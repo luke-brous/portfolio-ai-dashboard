@@ -14,12 +14,22 @@ jobs:
     - uses: oven-sh/setup-bun@v2
       with:
         bun-version: latest
+        
     - name: Install root dependencies
       run: bun install
+      
     - name: Install Backend Dependencies
       run: cd server && bun install
+      
+    - name: Run lint
+      run: bun run lint
+      
+    - name: Check formatting
+      run: bun run format:check
+      
     - name: Run typecheck
       run: bun run typecheck
+      
     - name: Run test suite
       run: bun run test
       env:
