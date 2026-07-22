@@ -28,19 +28,18 @@ export async function summarizeText(content: string): Promise<string> {
     }),
   });
 
-    const data = (await response.json()) as {
-      error?: { message?: string };
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
+  const data = (await response.json()) as {
+    error?: { message?: string };
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
 
-    if (!response.ok) {
-      throw new Error(
-        `Gemini API error: ${data.error?.message || "Unknown error"}`
-      );
-    }
+  if (!response.ok) {
+    throw new Error(
+      `Gemini API error: ${data.error?.message || "Unknown error"}`,
+    );
+  }
 
-    const summary = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const summary = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    return summary || "No summary returned from Gemini API";
-
+  return summary || "No summary returned from Gemini API";
 }

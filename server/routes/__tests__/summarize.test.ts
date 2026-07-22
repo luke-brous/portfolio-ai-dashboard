@@ -37,9 +37,7 @@ describe("Gemini summarize route", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        emails: [
-          { id: "1", subject: "Test Email", body: "Hello World" },
-        ],
+        emails: [{ id: "1", subject: "Test Email", body: "Hello World" }],
       }),
     });
 

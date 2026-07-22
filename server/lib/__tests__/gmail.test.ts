@@ -1,18 +1,26 @@
 import { describe, it, expect } from "bun:test";
 
-import { decodeBase64Url, getHeader, extractBody, buildGmailQuery } from "../gmail";
+import {
+  decodeBase64Url,
+  getHeader,
+  extractBody,
+  buildGmailQuery,
+} from "../gmail";
 
 describe("Gmail Parser Utilities", () => {
-  
   describe("buildGmailQuery", () => {
     it("should build a query with all parameters", () => {
-      expect(buildGmailQuery({ label: "inbox", after: "2026-06-01", before: "2026-06-30" }))
-        .toBe("label:inbox after:2026-06-01 before:2026-06-30");
+      expect(
+        buildGmailQuery({
+          label: "inbox",
+          after: "2026-06-01",
+          before: "2026-06-30",
+        }),
+      ).toBe("label:inbox after:2026-06-01 before:2026-06-30");
     });
 
     it("should build a query with only some parameters", () => {
-      expect(buildGmailQuery({ after: "2026-06-01" }))
-        .toBe("after:2026-06-01");
+      expect(buildGmailQuery({ after: "2026-06-01" })).toBe("after:2026-06-01");
     });
 
     it("should return undefined if no parameters are provided", () => {
@@ -30,8 +38,11 @@ describe("Gmail Parser Utilities", () => {
       // Create a string that requires + and / in standard base64
       const original = "Hello? World>";
       // Convert it to base64url format
-      const b64url = Buffer.from(original).toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
-      
+      const b64url = Buffer.from(original)
+        .toString("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+
       expect(decodeBase64Url(b64url)).toBe(original);
     });
   });
@@ -40,7 +51,7 @@ describe("Gmail Parser Utilities", () => {
     const mockHeaders = [
       { name: "Subject", value: "Project Update" },
       { name: "From", value: "boss@company.com" },
-      { name: "Date", value: "Mon, 1 Jul 2026 10:00:00 -0400" }
+      { name: "Date", value: "Mon, 1 Jul 2026 10:00:00 -0400" },
     ];
 
     it("should return the correct header value", () => {
@@ -60,7 +71,7 @@ describe("Gmail Parser Utilities", () => {
     it("should extract text/plain from a simple payload", () => {
       const payload = {
         mimeType: "text/plain",
-        body: { data: Buffer.from("Simple text data").toString("base64") }
+        body: { data: Buffer.from("Simple text data").toString("base64") },
       };
       expect(extractBody(payload)).toBe("Simple text data");
     });
@@ -68,7 +79,11 @@ describe("Gmail Parser Utilities", () => {
     it("should strip HTML tags if only text/html is available", () => {
       const payload = {
         mimeType: "text/html",
-        body: { data: Buffer.from("<h1>Important</h1><p>Update</p>").toString("base64") }
+        body: {
+          data: Buffer.from("<h1>Important</h1><p>Update</p>").toString(
+            "base64",
+          ),
+        },
       };
       expect(extractBody(payload)).toBe("ImportantUpdate");
     });
@@ -78,5 +93,4 @@ describe("Gmail Parser Utilities", () => {
       expect(extractBody(emptyPayload)).toBe("");
     });
   });
-
 });

@@ -1,26 +1,26 @@
-import { db } from './../index';
-import { nonprofits, investments } from './schema';
-import { eq } from 'drizzle-orm';
+import { db } from "./../index";
+import { nonprofits, investments } from "./schema";
+import { eq } from "drizzle-orm";
 
 // Placeholder seed. The real, locally-edited seed (server/db/seed.ts) is
 // gitignored and pointed at by SEED_FILE in .env. This file ships in
 // place of the real seed so the public repo contains no real data.
 
 async function seed() {
-  if (!process.argv.includes('--confirm')) {
-    console.error('Error: Seed utility requires --confirm flag to proceed.');
+  if (!process.argv.includes("--confirm")) {
+    console.error("Error: Seed utility requires --confirm flag to proceed.");
     process.exit(1);
   }
-  console.log('Starting database seeding (placeholder)...');
+  console.log("Starting database seeding (placeholder)...");
 
   try {
     const exampleNonprofits = [
       {
-        name: 'Example Nonprofit',
-        contactEmail: 'contact@example.org',
-        grantCycleDates: 'UPDATE to UPDATE',
+        name: "Example Nonprofit",
+        contactEmail: "contact@example.org",
+        grantCycleDates: "UPDATE to UPDATE",
         grantAmount: 0,
-        grantStatus: 'active',
+        grantStatus: "active",
       },
     ];
 
@@ -42,16 +42,16 @@ async function seed() {
 
     const exampleTickers = [
       {
-        ticker: 'EX1',
-        companyName: 'Example Holdings A',
-        sector: 'Example',
+        ticker: "EX1",
+        companyName: "Example Holdings A",
+        sector: "Example",
         shares: 1,
         percentOfAccount: 0.5,
       },
       {
-        ticker: 'EX2',
-        companyName: 'Example Holdings B',
-        sector: 'Example',
+        ticker: "EX2",
+        companyName: "Example Holdings B",
+        sector: "Example",
         shares: 1,
         percentOfAccount: 0.5,
       },
@@ -78,9 +78,9 @@ async function seed() {
         });
     }
 
-    console.log('Seeding complete (placeholder data).');
+    console.log("Seeding complete (placeholder data).");
   } catch (error) {
-    console.error('Error seeding database:', error);
+    console.error("Error seeding database:", error);
     process.exit(1);
   }
 }

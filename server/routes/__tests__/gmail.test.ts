@@ -17,37 +17,36 @@ mock.module("googleapis", () => ({
     auth: {
       OAuth2: class {
         setCredentials() {}
-      }
+      },
     },
     gmail: () => ({
       users: {
         messages: {
           list: () => ({
             data: {
-              messages: [{ id: "1" }]
-            }
+              messages: [{ id: "1" }],
+            },
           }),
           get: () => ({
             data: {
               id: "1",
               payload: {
                 mimeType: "text/plain",
-                body: { data: Buffer.from("test").toString("base64") }
-              }
-            }
-          })
+                body: { data: Buffer.from("test").toString("base64") },
+              },
+            },
+          }),
         },
         labels: {
-          list: () => ({ data: { labels: [] } })
-        }
-      }
-    })
-  }
+          list: () => ({ data: { labels: [] } }),
+        },
+      },
+    }),
+  },
 }));
 
 describe("Gmail routes", () => {
   test("missing 'label' parameter causes a 400 error", async () => {
-
     // Authenticate in order to bypass the middleware that checks for a session
     const sessionId = crypto.randomUUID();
     createSession(sessionId, { tokens: { access_token: "mock" } });
@@ -67,14 +66,14 @@ describe("Gmail routes", () => {
     const queryParams = new URLSearchParams({
       label: "INBOX",
       after: "2026-06-01",
-      before: "2026-06-30"
+      before: "2026-06-30",
     }).toString();
 
     // Dispatch the request directly to the Hono app instance
     const res = await gmail.request(`/messages?${queryParams}`, {
       headers: {
-        Cookie: "sessionId=mock-test-session-id"
-      }
+        Cookie: "sessionId=mock-test-session-id",
+      },
     });
 
     // Check the response status

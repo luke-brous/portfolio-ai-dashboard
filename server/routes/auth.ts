@@ -3,8 +3,8 @@ import crypto from "crypto";
 import { getCookie, setCookie } from "hono/cookie";
 import { getOAuthClient } from "../lib/google-client";
 import { createSession, getSession, deleteSession } from "../lib/session";
-import * as z from 'zod'
-import { zValidator } from '@hono/zod-validator'
+import * as z from "zod";
+import { zValidator } from "@hono/zod-validator";
 
 const auth = new Hono();
 
@@ -29,11 +29,10 @@ auth.get("/login", (c) => {
 // define schema
 const callbackSchema = z.object({
   code: z.string(),
-})
+});
 
-auth.get("/callback", zValidator('query', callbackSchema),  async (c) => {
-
-  const { code } = c.req.valid('query');
+auth.get("/callback", zValidator("query", callbackSchema), async (c) => {
+  const { code } = c.req.valid("query");
 
   if (!code) {
     return c.text("Missing code query parameter", 400);
@@ -45,14 +44,14 @@ auth.get("/callback", zValidator('query', callbackSchema),  async (c) => {
     const tokenResponse = await oauthClient.getToken(code);
     const tokens = tokenResponse.tokens;
 
-    // Store the tokens in a session 
+    // Store the tokens in a session
     const sessionId = crypto.randomUUID();
-    createSession(sessionId, { 
+    createSession(sessionId, {
       tokens: {
         access_token: tokens.access_token || "",
         refresh_token: tokens.refresh_token || undefined,
         expiry_date: tokens.expiry_date || undefined,
-      }
+      },
     });
 
     // Set a session cookie
@@ -77,7 +76,7 @@ auth.get("/me", async (c) => {
   const sessionId = getCookie(c, "sessionId");
 
   if (!sessionId) {
-    return c.json({ authed: false});
+    return c.json({ authed: false });
   }
 
   const session = getSession(sessionId);
@@ -85,7 +84,7 @@ auth.get("/me", async (c) => {
   if (session) {
     return c.json({ authed: true });
   } else {
-    return c.json({authed: false })
+    return c.json({ authed: false });
   }
 });
 

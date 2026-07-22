@@ -12,7 +12,9 @@ export default function DateRangePicker({
           type="date"
           className="w-full bg-white border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block px-4 py-3 outline-none transition-colors duration-200"
           value={value?.after ?? ""}
-          onChange={(e) => onChange({ after: e.target.value, before: value?.before ?? "" })}
+          onChange={(e) =>
+            onChange({ after: e.target.value, before: value?.before ?? "" })
+          }
         />
       </div>
       <span className="text-slate-400 font-light">to</span>
@@ -21,7 +23,9 @@ export default function DateRangePicker({
           type="date"
           className="w-full bg-white border border-slate-300 text-slate-700 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block px-4 py-3 outline-none transition-colors duration-200"
           value={value?.before ?? ""}
-          onChange={(e) => onChange({ after: value?.after ?? "", before: e.target.value })}
+          onChange={(e) =>
+            onChange({ after: value?.after ?? "", before: e.target.value })
+          }
         />
       </div>
     </div>

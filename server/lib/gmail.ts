@@ -8,25 +8,29 @@ import type { gmail_v1 } from "googleapis";
 
 export function decodeBase64Url(data: string): string {
   // Gmail uses base64url (- and _ instead of + and /).
-  
+
   const base64 = data.replace(/-/g, "+").replace(/_/g, "/");
 
   return Buffer.from(base64, "base64").toString("utf-8");
 }
 
-export function buildGmailQuery(params: { label?: string; after?: string; before?: string }): string | undefined {
+export function buildGmailQuery(params: {
+  label?: string;
+  after?: string;
+  before?: string;
+}): string | undefined {
   const queryParts = [
     params.label ? `label:${params.label}` : null,
     params.after ? `after:${params.after}` : null,
     params.before ? `before:${params.before}` : null,
   ].filter((part): part is string => Boolean(part));
-  
+
   return queryParts.length > 0 ? queryParts.join(" ") : undefined;
 }
 
 export function getHeader(
   headers: { name: string; value: string }[],
-  name: string
+  name: string,
 ): string | undefined {
   return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())
     ?.value;
@@ -54,9 +58,9 @@ export function extractBody(payload: gmail_v1.Schema$MessagePart): string {
       return result;
     }
     if (part.mimeType === "text/html" && result) {
-      fallbackHTML = result
+      fallbackHTML = result;
     }
-    if (part.mimeType!== "text/html" && result) {
+    if (part.mimeType !== "text/html" && result) {
       return result;
     }
   }

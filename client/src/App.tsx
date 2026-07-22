@@ -16,23 +16,21 @@ export default function App() {
   return (
     // The outer div MUST have min-h-screen and flex flex-col
     <div className="min-h-screen flex flex-col bg-slate-50">
-      <QueryClientProvider client={queryClient} >
-      <BrowserRouter>
-        
-        {/* Wrap your Routes in a main tag with flex-grow. 
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          {/* Wrap your Routes in a main tag with flex-grow. 
             This tells the main content area to stretch and fill all available space, 
             which violently shoves the footer to the bottom of the page. */}
-        <main className="flex-grow">
-          <Routes>
-            <Route path="/" element={<Login />} />
-            <Route path="/auth/login" element={<Login />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-          </Routes>
-        </main>
+          <main className="flex-grow">
+            <Routes>
+              <Route path="/" element={<Login />} />
+              <Route path="/auth/login" element={<Login />} />
+              <Route path="/dashboard" element={<Dashboard />} />
+            </Routes>
+          </main>
 
-        <Footer />
-        
-      </BrowserRouter>
+          <Footer />
+        </BrowserRouter>
       </QueryClientProvider>
     </div>
   );

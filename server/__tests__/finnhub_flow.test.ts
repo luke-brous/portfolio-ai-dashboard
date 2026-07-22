@@ -1,12 +1,5 @@
 import "dotenv/config";
-import {
-  describe,
-  it,
-  expect,
-  mock,
-  beforeEach,
-  afterAll,
-} from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterAll } from "bun:test";
 import { syncMarketData } from "../db/syncMarketData";
 import { investments } from "../db/schema";
 import { getQuote, getCompanyNews } from "../lib/finnhub";
@@ -76,9 +69,9 @@ const dbMockFactory = () => ({
       from: mock((table: unknown) => {
         if (table === investments) return { all: allFromInvestments };
         return {
-          where: mock(
-            () => ({ limit: mock(() => ({ all: allFromPriceSnapshots })) }),
-          ),
+          where: mock(() => ({
+            limit: mock(() => ({ all: allFromPriceSnapshots })),
+          })),
         };
       }),
     })),
@@ -158,9 +151,7 @@ describe("Finnhub Integration Flow", () => {
     });
 
     it("skips a ticker whose snapshot already exists today, without calling Finnhub", async () => {
-      allFromInvestments.mockImplementation(() => [
-        { id: 1, ticker: "AAPL" },
-      ]);
+      allFromInvestments.mockImplementation(() => [{ id: 1, ticker: "AAPL" }]);
       allFromPriceSnapshots.mockImplementation(() => [{ id: 99 }]);
 
       const result = await syncMarketData();

@@ -142,9 +142,9 @@ describe("news_items INSERT OR IGNORE idempotency", () => {
       2,
     ]);
 
-    const total = db
-      .query("SELECT COUNT(*) AS c FROM news_items")
-      .get() as { c: number } | null;
+    const total = db.query("SELECT COUNT(*) AS c FROM news_items").get() as {
+      c: number;
+    } | null;
     expect(total?.c).toBe(2);
   });
 });

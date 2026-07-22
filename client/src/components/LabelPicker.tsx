@@ -9,8 +9,10 @@ export default function LabelPicker({
 }) {
   const { data, isLoading, error } = useLabels();
 
-  if (isLoading) return <div className="text-sm text-slate-500">Loading labels...</div>;
-  if (error) return <div className="text-sm text-red-500">Error loading labels</div>;
+  if (isLoading)
+    return <div className="text-sm text-slate-500">Loading labels...</div>;
+  if (error)
+    return <div className="text-sm text-red-500">Error loading labels</div>;
 
   const labels = data?.labels || [];
 

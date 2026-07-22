@@ -8,9 +8,9 @@
  */
 
 export type SyncRun = {
-    at: Date;
-    ok: boolean;
-    note: string;
+  at: Date;
+  ok: boolean;
+  note: string;
 };
 
 let lastSyncRun: SyncRun | null = null;
@@ -18,34 +18,37 @@ let inFlight = false;
 
 /** Mark a tick as having entered the run. Idempotent if already true. */
 export function recordSyncStart(): void {
-    inFlight = true;
+  inFlight = true;
 }
 
 /** Clear the in-flight flag. Safe to call multiple times. */
 export function recordSyncFinish(): void {
-    inFlight = false;
+  inFlight = false;
 }
 
 /** Reset the state for testing purposes. */
 export function resetSyncStateForTesting(): void {
-    lastSyncRun = null;
-    inFlight = false;
+  lastSyncRun = null;
+  inFlight = false;
 }
 
 /** Record the outcome of a completed (or failed) sync run. */
 export function recordSyncRun(outcome: SyncRun): void {
-    lastSyncRun = outcome;
+  lastSyncRun = outcome;
 }
 
 export function isSyncInFlight(): boolean {
-    return inFlight;
+  return inFlight;
 }
 
 export function getLastRun(): SyncRun | null {
-    return lastSyncRun;
+  return lastSyncRun;
 }
 
 /** Combined view used by the new /portfolio/sync-status handler. */
-export function getSyncSnapshot(): { lastRun: SyncRun | null; inFlight: boolean } {
-    return { lastRun: lastSyncRun, inFlight };
+export function getSyncSnapshot(): {
+  lastRun: SyncRun | null;
+  inFlight: boolean;
+} {
+  return { lastRun: lastSyncRun, inFlight };
 }

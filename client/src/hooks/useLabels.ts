@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { Label } from "../types/index"
+import type { Label } from "../types/index";
 
 export function useLabels() {
   return useQuery<{ labels: Label[] }, Error>({

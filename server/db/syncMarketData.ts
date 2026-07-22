@@ -32,7 +32,9 @@ export async function syncMarketData(): Promise<{
   const tickers = rows.map((r) => ({ id: r.id, ticker: r.ticker }));
 
   if (tickers.length === 0) {
-    console.log("[syncMarketData] No tickers found in `investments`, nothing to sync.");
+    console.log(
+      "[syncMarketData] No tickers found in `investments`, nothing to sync.",
+    );
     return { tickersProcessed: 0, tickersFailed: 0, tickersSkipped: 0 };
   }
 
@@ -60,7 +62,7 @@ export async function syncMarketData(): Promise<{
 
   for (const { id: investmentId, ticker } of tickersToProcess) {
     try {
-      //  Same-day guard: skip if we already have a snapshot since midnight 
+      //  Same-day guard: skip if we already have a snapshot since midnight
       const existing = await db
         .select({ id: priceSnapshots.id })
         .from(priceSnapshots)
@@ -103,7 +105,7 @@ export async function syncMarketData(): Promise<{
         timestamp: new Date(),
       });
 
-      //  News (last 7 days; idempotent on finnhub_id) 
+      //  News (last 7 days; idempotent on finnhub_id)
       const news = await getCompanyNews(ticker, fromStr, toStr);
       const validNews = (news ?? []).filter(
         (n): n is FinnhubNewsItem =>
