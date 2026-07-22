@@ -8,7 +8,7 @@ import {
   afterAll,
 } from "bun:test";
 import { syncMarketData } from "../db/syncMarketData";
-import { investments, priceSnapshots } from "../db/schema";
+import { investments } from "../db/schema";
 import { getQuote, getCompanyNews } from "../lib/finnhub";
 
 // ---------- Mockable references ------------------------------------------------------------
@@ -72,7 +72,7 @@ const dbMockFactory = () => ({
     // argument to the schema symbols. Bun resolves both the test's
     // `../db/schema` and syncMarketData's `./schema` to the same module
     // instance in memory, so symbol identity is reliable here.
-    select: mock((_cols: unknown) => ({
+    select: mock(() => ({
       from: mock((table: unknown) => {
         if (table === investments) return { all: allFromInvestments };
         return {

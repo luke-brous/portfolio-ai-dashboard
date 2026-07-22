@@ -3,7 +3,6 @@ import {
   text,
   integer,
   real,
-  snakeCase,
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 

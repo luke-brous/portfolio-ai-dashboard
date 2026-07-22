@@ -1,19 +1,12 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-
-interface Summary {
-  id: string;
-  from: string;
-  subject: string;
-  date: string;
-  summary: string;
-}
+import { useMutation } from "@tanstack/react-query";
+import type { Email, Summary } from "../types";
 
 interface SummarizeRequest {
-  emails: any[];
+  emails: Email[];
 }
 
 export function useSummarizeMutation() {
-  const backendURL = (import.meta as any).env.VITE_BACKEND_URL;
+  const backendURL = import.meta.env.VITE_BACKEND_URL;
 
   return useMutation<Summary[], Error, SummarizeRequest>({
     mutationFn: async (data: SummarizeRequest) => {

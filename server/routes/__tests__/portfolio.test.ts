@@ -24,9 +24,7 @@ function makeChain(table: unknown) {
         // sort the mocked rows by ticker descending—er, ascending. Whatever
         // direction the test opts into, sort accordingly.
         return {
-            orderBy: (
-                _sortCol: ReturnType<typeof import("drizzle-orm").asc>,
-            ) => {
+            orderBy: () => {
                 const rows = investmentsAll();
                 // Drizzle's `asc` returns a column descriptor; the real query
                 // is sorted ASC by the underlying column. Tests only assert

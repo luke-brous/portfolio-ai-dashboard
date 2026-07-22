@@ -1,3 +1,4 @@
+import type { gmail_v1 } from "googleapis";
 // Helpers for working with raw Gmail API responses.
 //
 // Gmail returns message bodies as base64url-encoded strings nested
@@ -31,7 +32,7 @@ export function getHeader(
     ?.value;
 }
 
-export function extractBody(payload: any): string {
+export function extractBody(payload: gmail_v1.Schema$MessagePart): string {
   // walk payload.parts recursively (multipart/alternative,
   // multipart/mixed) looking for a text/plain part, falling back to
   // text/html if no text/plain is found, and decode the body data.
@@ -56,7 +57,6 @@ export function extractBody(payload: any): string {
       fallbackHTML = result
     }
     if (part.mimeType!== "text/html" && result) {
-      fallbackHTML = result;
       return result;
     }
   }

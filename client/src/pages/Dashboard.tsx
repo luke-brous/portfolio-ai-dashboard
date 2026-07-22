@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import LabelPicker from "../components/LabelPicker";
 import DateRangePicker from "../components/DateRangePicker";
 import SummaryCard from "../components/SummaryCard";
+import type { Summary } from "../types/index"
 import ExportButton from "../components/ExportButton";
 import { EmailCardSkeleton } from "../components/EmailCardSkeleton";
 import { useEmails } from "../hooks/useEmails";
@@ -18,7 +19,7 @@ export default function Dashboard() {
 
   useEffect(() => {
   if (!authLoading && !authData?.isAuthed) {
-    const backendURL = (import.meta as any).env.VITE_BACKEND_URL;
+    const backendURL = import.meta.env.VITE_BACKEND_URL;
     window.location.href = `${backendURL}/auth/login`;
   }
 }, [authData, authLoading]);
@@ -49,7 +50,7 @@ export default function Dashboard() {
     // Nuke cached data before redirecting 
     queryClient.clear();
     
-    const backendURL = (import.meta as any).env.VITE_BACKEND_URL;
+    const backendURL = import.meta.env.VITE_BACKEND_URL;
     
     // destroy the cookie by routing user to backend logout endpoint
     window.location.href = `${backendURL}/auth/logout`;
@@ -132,7 +133,7 @@ export default function Dashboard() {
 
           {/* The Summary Cards */}
           <div className="grid grid-cols-1 gap-6">
-            {summaries.map((s: any) => (
+            {summaries.map((s: Summary) => (
               <SummaryCard key={s.id} summary={s} />
             ))}
           </div>

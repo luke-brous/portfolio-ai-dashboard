@@ -10,7 +10,6 @@ import { logger } from "./logger";
 import { syncMarketData } from "./db/syncMarketData";
 import {
     getLastRun,
-    getSyncSnapshot,
     isSyncInFlight,
     recordSyncFinish,
     recordSyncRun,

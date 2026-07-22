@@ -1,12 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-
-interface Email {
-  id: string;
-  from: string;
-  subject: string;
-  body: string;
-  date: string;
-}
+import type { Email } from "../types";
 
 const fetchEmails = async (label: string, dateRange: { after: string; before: string }): Promise<Email[]> => {
   const queryParams = new URLSearchParams({
@@ -15,7 +8,7 @@ const fetchEmails = async (label: string, dateRange: { after: string; before: st
     before: dateRange.before,
   });
 
-  const backendURL = (import.meta as any).env.VITE_BACKEND_URL;
+  const backendURL = import.meta.env.VITE_BACKEND_URL;
 
   const response = await fetch(`${backendURL}/gmail/messages?${queryParams.toString()}`, {
     credentials: "include",

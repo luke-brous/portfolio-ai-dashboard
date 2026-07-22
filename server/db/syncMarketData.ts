@@ -4,7 +4,7 @@ import { db } from "..";
 import { investments, priceSnapshots } from "./schema";
 import { getQuote, getCompanyNews } from "../lib/finnhub";
 import { sleep } from "../lib/utils";
-import type { FinnhubNewsItem, FinnhubQuote } from "../types/finnhub";
+import type { FinnhubNewsItem } from "../types/finnhub";
 
 //
 //  Scheduled Finnhub sync.

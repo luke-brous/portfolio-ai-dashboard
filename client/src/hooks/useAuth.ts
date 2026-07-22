@@ -4,7 +4,7 @@ export function useAuth() {
   return useQuery({
     queryKey: ["auth"],
     queryFn: async () => {
-      const backendURL = (import.meta as any).env.VITE_BACKEND_URL;
+      const backendURL = import.meta.env.VITE_BACKEND_URL;
       const response = await fetch(`${backendURL}/auth/me`, {
         credentials: "include",
       });

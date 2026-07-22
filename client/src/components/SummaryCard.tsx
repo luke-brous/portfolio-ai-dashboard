@@ -1,10 +1,4 @@
-interface Summary {
-  id: string;
-  from: string;
-  subject: string;
-  date: string;
-  summary: string;
-}
+import type { Summary } from "../types";
 
 export default function SummaryCard({ summary }: { summary: Summary }) {
   return (
