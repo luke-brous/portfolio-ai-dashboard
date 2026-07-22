@@ -7,5 +7,5 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 // `index.ts` → cycle). Importing `db` from `./db/client` keeps that graph
 // a DAG.
 export const db = drizzle(
-    process.env.DB_FILE_NAME || "/workspaces/gmail-summarizer/sqlite.db",
+    process.env.DB_FILE_NAME || "/workspaces/portfolio-ai-dashboard/sqlite.db",
 );

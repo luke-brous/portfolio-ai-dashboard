@@ -29,7 +29,7 @@ const app = new Hono();
 app.use(
     "*",
     cors({
-        origin: "https://legendary-couscous-7vr4496p4vp43wxp-5173.app.github.dev",
+        origin: "https://opulent-space-happiness-g45wwqj7pjwq3v56w-5173.app.github.dev",
         credentials: true,
     })
 );
