@@ -10,6 +10,7 @@ export default defineConfig({
   
   dialect: 'sqlite',
   dbCredentials: {
-    url: process.env.DB_FILE_NAME || '/workspaces/gmail-summarizer/sqlite.db',
+    //@ts-ignore
+    url: process.env.DB_FILE_NAME || '/workspaces/portfolio-ai-dashboard/sqlite.db',
   },
 });

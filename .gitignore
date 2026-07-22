@@ -132,3 +132,6 @@ server/db/data/*.csv
 
 # ignore seed files
 server/db/seed.ts
+
+# Ignore personal md files
+*.md
