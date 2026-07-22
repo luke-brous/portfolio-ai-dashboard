@@ -10,8 +10,8 @@ export default defineConfig({
 
   dialect: "sqlite",
   dbCredentials: {
-    // @ts-expect-error: process is not typed in global scope
     url:
+      // @ts-expect-error: process is not typed in global scope
       process.env.DB_FILE_NAME ||
       "/workspaces/portfolio-ai-dashboard/sqlite.db",
   },
