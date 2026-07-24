@@ -12,6 +12,7 @@ export default defineConfig({
       "/gmail": "http://localhost:3000",
       "/summarize": "http://localhost:3000",
       "/export": "http://localhost:3000",
+      "/portfolio": "http://localhost:3000",
     },
   },
 });
