@@ -29,7 +29,7 @@ export default function App() {
               <Route path="/auth/login" element={<Login />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="*" element={<NotFound />} />
-              <Route path="/advisor" element={<Advisor />}/>
+              <Route path="/advisor" element={<Advisor />} />
             </Routes>
           </main>
 

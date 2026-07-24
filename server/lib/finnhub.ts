@@ -48,8 +48,7 @@ export async function getQuote(ticker: string): Promise<FinnhubQuote> {
     }
 
     return (await response.json()) as FinnhubQuote;
-  })
-
+  });
 }
 
 export async function getCompanyNews(
