@@ -65,7 +65,7 @@ auth.get("/callback", zValidator("query", callbackSchema), async (c) => {
 
     // Redirect back to the frontend
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
-    return c.redirect(`${frontendUrl}/dashboard`);
+    return c.redirect(`${frontendUrl}/landing`);
   } catch (error) {
     console.error("Error exchanging code for tokens:", error);
     return c.text("Error exchanging code for tokens", 500);
