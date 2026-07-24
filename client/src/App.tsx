@@ -1,7 +1,9 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Login from "./pages/Login"; // Adjust your import paths as needed
 import Dashboard from "./pages/Dashboard";
+import NotFound from "./pages/NotFound";
 import Footer from "./components/Footer";
+import Advisor from "./pages/Advisor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const queryClient = new QueryClient({
@@ -26,6 +28,8 @@ export default function App() {
               <Route path="/" element={<Login />} />
               <Route path="/auth/login" element={<Login />} />
               <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="*" element={<NotFound />} />
+              <Route path="/advisor" element={<Advisor />} />
             </Routes>
           </main>
 

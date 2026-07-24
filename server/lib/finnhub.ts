@@ -1,5 +1,6 @@
 import "dotenv/config";
 import type { FinnhubNewsItem, FinnhubQuote } from "../types/finnhub";
+import { withRateLimit, FinnhubRateLimitError } from "./rateLimit";
 
 const FINNHUB_BASE_URL = "https://finnhub.io/api/v1";
 
@@ -32,16 +33,22 @@ export function __resetFetch(): void {
 }
 
 export async function getQuote(ticker: string): Promise<FinnhubQuote> {
-  const url = `${FINNHUB_BASE_URL}/quote?symbol=${ticker}&token=${process.env.FINNHUB_API_KEY}`;
-  const response = await fetchImpl(url);
+  return withRateLimit(async () => {
+    const url = `${FINNHUB_BASE_URL}/quote?symbol=${ticker}&token=${process.env.FINNHUB_API_KEY}`;
+    const response = await fetchImpl(url);
 
-  if (!response.ok) {
-    throw new Error(
-      `Finnhub Quote Error for ${ticker}: ${response.status} ${response.statusText}`,
-    );
-  }
+    if (response.status === 429) {
+      throw new FinnhubRateLimitError();
+    }
 
-  return (await response.json()) as FinnhubQuote;
+    if (!response.ok) {
+      throw new Error(
+        `Finnhub Quote Error for ${ticker}: ${response.status} ${response.statusText}`,
+      );
+    }
+
+    return (await response.json()) as FinnhubQuote;
+  });
 }
 
 export async function getCompanyNews(
@@ -49,16 +56,22 @@ export async function getCompanyNews(
   startDate: string,
   endDate: string,
 ): Promise<FinnhubNewsItem[]> {
-  const url = `${FINNHUB_BASE_URL}/company-news?symbol=${ticker}&from=${startDate}&to=${endDate}&token=${process.env.FINNHUB_API_KEY}`;
-  const response = await fetchImpl(url);
+  return withRateLimit(async () => {
+    const url = `${FINNHUB_BASE_URL}/company-news?symbol=${ticker}&from=${startDate}&to=${endDate}&token=${process.env.FINNHUB_API_KEY}`;
+    const response = await fetchImpl(url);
 
-  if (!response.ok) {
-    throw new Error(
-      `Finnhub Company News Error for ${ticker}: ${response.status} ${response.statusText}`,
-    );
-  }
+    if (!response.ok) {
+      throw new Error(
+        `Finnhub Company News Error for ${ticker}: ${response.status} ${response.statusText}`,
+      );
+    }
 
-  return (await response.json()) as FinnhubNewsItem[];
+    if (response.status === 429) {
+      throw new FinnhubRateLimitError();
+    }
+
+    return (await response.json()) as FinnhubNewsItem[];
+  });
 }
 
 // ADDING MORE API CALLS HERE WILL HIT LIMIT, MUST UPDATE WORKERS IF ADDING ANYTHING MORE

@@ -4,7 +4,6 @@ import { cors } from "hono/cors";
 import auth from "./routes/auth";
 import gmail from "./routes/gmail";
 import summarize from "./routes/summarize";
-import exportRoute from "./routes/export";
 import portfolio from "./routes/portfolio";
 import { logger } from "./logger";
 import { syncMarketData } from "./db/syncMarketData";
@@ -60,7 +59,6 @@ app.get("/", (c) => c.text("Mail Brief API is running"));
 app.route("/auth", auth);
 app.route("/gmail", gmail);
 app.route("/summarize", summarize);
-app.route("/export", exportRoute);
 app.route("/portfolio", portfolio);
 
 // ---------------------------------------------------------------------------

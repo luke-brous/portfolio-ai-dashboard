@@ -4,7 +4,6 @@ import LabelPicker from "../components/LabelPicker";
 import DateRangePicker from "../components/DateRangePicker";
 import SummaryCard from "../components/SummaryCard";
 import type { Summary } from "../types/index";
-import ExportButton from "../components/ExportButton";
 import { EmailCardSkeleton } from "../components/EmailCardSkeleton";
 import { useEmails } from "../hooks/useEmails";
 import { useAuth } from "../hooks/useAuth";
@@ -117,7 +116,6 @@ export default function Dashboard() {
             >
               {isSummarizing ? "Analyzing..." : "Generate Brief"}
             </button>
-            <ExportButton disabled={summaries.length === 0} />
           </div>
         </section>
 
