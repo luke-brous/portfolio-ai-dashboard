@@ -1,9 +1,15 @@
 import { apiGet } from "../lib/api";
 import { useQuery } from "@tanstack/react-query";
 
-type SyncStatus = {
-  lastSynced: string | null;
-  isSyncing: boolean | null;
+type SyncRun = {
+    at: string,
+    ok: boolean,
+    note: string,
+}
+
+type SyncStatusResponse = {
+  lastRun: SyncRun | null;
+  inFlight: boolean | null;
 };
 
 export function useSyncStatus() {
@@ -12,13 +18,13 @@ export function useSyncStatus() {
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["sync-status"],
-    queryFn: () => apiGet<SyncStatus>("/portfolio/sync-status"),
+    queryFn: () => apiGet<SyncStatusResponse>("/portfolio/sync-status"),
     refetchInterval: 60000, // 1 minute
   });
 
   return {
-    isSyncing: data?.isSyncing ?? false,
-    lastSynced: data?.lastSynced ?? null,
+    inFlight: data?.inFlight ?? false,
+    lastRun: data?.lastRun?.at ?? null,
     isLoading,
     isError,
   };

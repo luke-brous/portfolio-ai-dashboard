@@ -15,21 +15,21 @@ function formatRelativeTime(iso: string | null): string {
 }
 
 export default function SyncBadge() {
-  const { isSyncing, lastSynced, isLoading } = useSyncStatus();
+  const { lastRun, inFlight, isLoading } = useSyncStatus();
 
   const dotClass = isLoading
     ? "bg-slate-300 animate-pulse"
-    : isSyncing
+    : inFlight
       ? "bg-indigo-500 animate-pulse"
-      : lastSynced
+      : lastRun
         ? "bg-emerald-500"
         : "bg-slate-300";
 
   const text = isLoading
     ? "Loading sync status…"
-    : isSyncing
+    : inFlight
       ? "Syncing…"
-      : formatRelativeTime(lastSynced);
+      : formatRelativeTime(lastRun);
 
   return (
     <div
