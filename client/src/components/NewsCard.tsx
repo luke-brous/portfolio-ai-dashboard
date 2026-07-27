@@ -17,7 +17,8 @@ function formatRelative(iso: string): string {
 }
 
 export default function NewsCard({ item }: { item: NewsItem }) {
-  // If there's a source URL, render as a link; otherwise as a plain card.
+  // If there's a source URL, render as a link,
+  // else a plain card.
   const linkProps: { href: string; target: "_blank"; rel: string } | object =
     item.url
       ? {

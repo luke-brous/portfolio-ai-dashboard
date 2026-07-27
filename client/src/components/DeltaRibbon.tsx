@@ -1,7 +1,7 @@
 type Props = {
-  /** Signed dollar delta (e.g. +12.34 or -12.34). Null = unknown. */
+  /** Signed dollar delta, Null = unknown. */
   dollarDelta: number | null;
-  /** Signed percent delta (e.g. +3.45 or -3.45). Null = unknown. */
+  /** Signed percent delta, Null = unknown. */
   percentDelta: number | null;
 };
 

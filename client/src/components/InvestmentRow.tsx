@@ -14,8 +14,8 @@ function formatAsOf(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  // Render a stable, human-friendly local timestamp so the row
-  // does not flicker every minute as `Date.now()` advances.
+  // Render a local timestamp so the row
+  // does not flicker every minute as the Date.now() advances.
   const datePart = d.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",

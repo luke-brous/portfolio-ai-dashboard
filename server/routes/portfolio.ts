@@ -134,9 +134,7 @@ function toSnapshotDTO(s: Snapshot): SnapshotDTO {
     prevClose: s.prevClose,
     // `s.timestamp` is a Date when rows come from drizzle's typed
     // builder, but a Unix-seconds number when rows come from a raw
-    // `db.all(sql\`...\`)`. Normalise so the route works against
-    // either source. Once every caller of this helper is on the typed
-    // builder, this branch can go away.
+    // sql call. Normalise so the route works for either one.
     timestamp: (s.timestamp instanceof Date
       ? s.timestamp
       : new Date(s.timestamp * 1000)
@@ -199,9 +197,7 @@ portfolio.get("/investments", async (c) => {
     }
 
     // Query 2: at most the 2 most-recent snapshots per held investment
-    // (ROW_NUMBER() makes the per-group limit exact at the engine — the
-    // previous flat ORDER + LIMIT(n*2) silently starved less-active
-    // tickers). Outer SELECT aliases each snake_case column to camelCase
+    // (ROW_NUMBER() makes the per-group limit exact at the engine). Outer SELECT aliases each snake_case column to camelCase
     // because drizzle's raw `db.all(sql\`...\`)`, unlike the typed
     // builder, does NOT auto-translate column names — and downstream
     // reads use camelCase. The outer ORDER BY also preserves
