@@ -4,7 +4,7 @@
 const GEMINI_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent";
 
-export async function summarizeText(content: string): Promise<string> {
+export let summarizeText = async (content: string): Promise<string> => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
 
@@ -42,4 +42,10 @@ export async function summarizeText(content: string): Promise<string> {
   const summary = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
   return summary || "No summary returned from Gemini API";
+};
+
+export async function __setSummarizeForTests(
+  fn: (content: string) => Promise<string>,
+) {
+  summarizeText = fn;
 }

@@ -62,3 +62,33 @@ export interface InvestmentwithSnapshot extends Investment {
   previousSnapshot: InvestmentSnapshot | null;
   delta: Investment["delta"];
 }
+
+export interface Nonprofit {
+  id: number;
+  name: string;
+  contactEmail: string | null;
+  grantCycleDates: string | null;
+  grantAmount: number | null;
+  grantStatus: string | null;
+}
+
+export interface Report {
+  id: number;
+  nonprofitId: number;
+  messageId: string;
+  summary: string;
+  date: string;
+}
+
+export interface GenerateReportResponse {
+  nonprofitId: number;
+  fetched: number; // gmail matches
+  persisted: number; // new rows in reports table
+  summaries: Array<{
+    messageId: string;
+    from: string;
+    subject: string;
+    date: string;
+    summary: string;
+  }>;
+}

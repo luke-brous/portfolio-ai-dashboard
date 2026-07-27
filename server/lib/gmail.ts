@@ -18,11 +18,13 @@ export function buildGmailQuery(params: {
   label?: string;
   after?: string;
   before?: string;
+  from?: string;
 }): string | undefined {
   const queryParts = [
     params.label ? `label:${params.label}` : null,
     params.after ? `after:${params.after}` : null,
     params.before ? `before:${params.before}` : null,
+    params.from ? `from:${params.from}` : null,
   ].filter((part): part is string => Boolean(part));
 
   return queryParts.length > 0 ? queryParts.join(" ") : undefined;

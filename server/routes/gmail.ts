@@ -15,6 +15,7 @@ const gmailSchema = z.object({
   label: z.string(),
   after: z.string().optional(),
   before: z.string().optional(),
+  from: z.string().optional(),
 });
 
 gmail.use("*", async (c, next) => {
@@ -54,8 +55,9 @@ gmail.get("/messages", zValidator("query", gmailSchema), async (c) => {
   const label = c.req.query("label");
   const after = c.req.query("after");
   const before = c.req.query("before");
+  const from = c.req.query("from");
 
-  const q = buildGmailQuery({ after, before });
+  const q = buildGmailQuery({ after, before, from });
 
   const searchResponse = await client.users.messages.list({
     userId: "me",
