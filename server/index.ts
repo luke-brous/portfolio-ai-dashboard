@@ -5,6 +5,7 @@ import auth from "./routes/auth";
 import gmail from "./routes/gmail";
 import summarize from "./routes/summarize";
 import portfolio from "./routes/portfolio";
+import crm from "./routes/crm";
 import { logger } from "./logger";
 import { syncMarketData } from "./db/syncMarketData";
 import {
@@ -60,6 +61,7 @@ app.route("/auth", auth);
 app.route("/gmail", gmail);
 app.route("/summarize", summarize);
 app.route("/portfolio", portfolio);
+app.route("/crm", crm);
 
 // ---------------------------------------------------------------------------
 // Scheduled Finnhub sync.
