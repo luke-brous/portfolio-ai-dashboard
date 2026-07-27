@@ -5,7 +5,7 @@ import { Hono } from "hono";
 // import — see the comment in server/db/client.ts for the DAG rationale.
 import { db } from "../db/client";
 import { investments, priceSnapshots, newsItems } from "../db/schema";
-import { asc, desc, eq, and, gte, inArray } from "drizzle-orm";
+import { asc, desc, eq, and, gte, sql } from "drizzle-orm";
 import { logger } from "../logger";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
@@ -114,13 +114,11 @@ type SnapshotDTO = {
 type Delta = {
   price: number | null;
   percentChange: number | null;
-  absoluteChange: number | null;
 };
 
 const NULL_DELTA: Delta = {
   price: null,
   percentChange: null,
-  absoluteChange: null,
 };
 
 // ---------- Helpers ----------------------------------------------------------
@@ -134,7 +132,13 @@ function toSnapshotDTO(s: Snapshot): SnapshotDTO {
     low: s.low,
     open: s.open,
     prevClose: s.prevClose,
-    timestamp: s.timestamp.toISOString(),
+    // `s.timestamp` is a Date when rows come from drizzle's typed
+    // builder, but a Unix-seconds number when rows come from a raw
+    // sql call. Normalise so the route works for either one.
+    timestamp: (s.timestamp instanceof Date
+      ? s.timestamp
+      : new Date(s.timestamp * 1000)
+    ).toISOString(),
   };
 }
 
@@ -145,7 +149,7 @@ function round2(n: number): number {
 /**
  * Day-over-day delta from a pair of snapshot rows.
  *
- * - Either side missing → all three fields are null so the dashboard can
+ * - Either side missing → both fields are null so the dashboard can
  *   still render the row, just without a delta ribbon.
  *
  * `delta.price` is the signed difference (latest − previous).
@@ -164,7 +168,6 @@ function computeDelta(
   return {
     price: priceDelta,
     percentChange: round2((priceDelta / previous.price) * 100),
-    absoluteChange: Math.abs(priceDelta),
   };
 }
 
@@ -193,19 +196,38 @@ portfolio.get("/investments", async (c) => {
       return c.json({ investments: [] });
     }
 
-    // Query 2, up to N = 2 × tickers.length most-recent rows for the held
-    // tickers only, ordered (investmentId ASC, timestamp DESC). The order
-    // + the JS walk below give us "first two per group" without window
-    // functions, and the cap keeps the query bounded as the portfolio
-    // grows.
+    // Query 2: at most the 2 most-recent snapshots per held investment
+    // (ROW_NUMBER() makes the per-group limit exact at the engine). Outer SELECT aliases each snake_case column to camelCase
+    // because drizzle's raw `db.all(sql\`...\`)`, unlike the typed
+    // builder, does NOT auto-translate column names — and downstream
+    // reads use camelCase. The outer ORDER BY also preserves
+    // (investment_id ASC, timestamp DESC) so the JS map (first row per
+    // id = latest, second = previous) keeps working.
     const investmentIds = investmentsRows.map((row) => row.id);
-    const recentSnapshots = await db
-      .select()
-      .from(priceSnapshots)
-      .where(inArray(priceSnapshots.investmentId, investmentIds))
-      .orderBy(asc(priceSnapshots.investmentId), desc(priceSnapshots.timestamp))
-      .limit(investmentIds.length * 2)
-      .all();
+    type RankedSnapshot = Snapshot & { rn: number };
+    const recentSnapshots = (await db.all(sql`
+      WITH ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY investment_id ORDER BY timestamp DESC
+        ) AS rn
+        FROM price_snapshots
+        WHERE investment_id IN (${sql.join(investmentIds, sql`, `)})
+      )
+      SELECT
+        id AS "id",
+        investment_id AS "investmentId",
+        price AS "price",
+        change AS "change",
+        percent_change AS "percentChange",
+        high AS "high",
+        low AS "low",
+        open AS "open",
+        prev_close AS "prevClose",
+        timestamp AS "timestamp"
+      FROM ranked
+      WHERE rn <= 2
+      ORDER BY investment_id ASC, timestamp DESC
+    `)) as RankedSnapshot[];
 
     // build a Map<investmentId, { latest, previous }>.
     // Rows arrive in (investmentId ASC, timestamp DESC) order (Query 2's

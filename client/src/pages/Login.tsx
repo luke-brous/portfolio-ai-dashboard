@@ -6,7 +6,7 @@ export default function Login() {
       {/* Navbar */}
       <nav className="w-full py-6 px-8 md:px-16 flex justify-between items-center border-b border-slate-200">
         <div className="text-xl font-bold tracking-tight text-indigo-950">
-          Mail Brief
+          Portfolio AI Dashboard
         </div>
         <div className="flex gap-8 text-sm font-medium text-slate-600">
           {/* Smooth color transitions, no bounces */}
@@ -14,13 +14,7 @@ export default function Login() {
             href="#"
             className="hover:text-indigo-600 transition-colors duration-300 ease-in-out"
           >
-            How it Works
-          </a>
-          <a
-            href="#"
-            className="hover:text-indigo-600 transition-colors duration-300 ease-in-out"
-          >
-            Privacy
+            About
           </a>
         </div>
       </nav>
@@ -28,12 +22,12 @@ export default function Login() {
       {/* Main Content - No Cards, just organic layout */}
       <main className="flex flex-col justify-center items-start max-w-3xl mx-auto px-8 md:px-16 pt-32 pb-16">
         <h1 className="text-5xl md:text-6xl font-bold tracking-tight text-indigo-950 mb-6 leading-tight">
-          Tame your inbox <br className="hidden md:block" /> with AI.
+          Manage CRM and <br className="hidden md:block" /> Market Intelligence.
         </h1>
 
         <p className="text-lg md:text-xl text-slate-600 mb-12 max-w-lg leading-relaxed font-light">
-          Connect your Google account and let Gemini summarize your labeled
-          threads in seconds. No clutter, just the brief.
+          Connect your Google account to summarize nonprofit threads and track
+          live investment performance and market news in one unified dashboard.
         </p>
 
         <button
