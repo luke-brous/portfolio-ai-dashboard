@@ -27,23 +27,14 @@ function formatAsOf(iso: string | null): string {
   return `${datePart}, ${timePart}`;
 }
 
-function computePercentDelta(
-  latest: number | null,
-  previous: number | null,
-): number | null {
-  if (latest === null || previous === null || previous === 0) return null;
-  return ((latest - previous) / previous) * 100;
-}
-
 export default function InvestmentRow({
   investment,
 }: {
   investment: Investment;
 }) {
   const latest = investment.latestSnapshot?.price ?? null;
-  const previous = investment.previousSnapshot?.price ?? null;
-  const dollarDelta = investment.delta;
-  const percentDelta = computePercentDelta(latest, previous);
+  const dollarDelta = investment.delta?.price ?? null;
+  const percentDelta = investment.delta?.percentChange ?? null;
   const asOf = investment.latestSnapshot?.timestamp ?? null;
 
   return (

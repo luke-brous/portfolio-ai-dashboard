@@ -51,11 +51,14 @@ export interface Investment {
   percentOfAccount: number;
   latestSnapshot: InvestmentSnapshot | null;
   previousSnapshot: InvestmentSnapshot | null;
-  delta: number | null;
+  delta: {
+    price: number | null;
+    percentChange: number | null;
+  } | null;
 }
 
 export interface InvestmentwithSnapshot extends Investment {
   latestSnapshot: InvestmentSnapshot | null;
   previousSnapshot: InvestmentSnapshot | null;
-  delta: number | null;
+  delta: Investment["delta"];
 }

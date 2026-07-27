@@ -66,6 +66,11 @@ const dbMockFactory = () => ({
     select: mock(() => ({
       from: mock((table: unknown) => makeChain(table)),
     })),
+    all: mock(async (queryPromise: Promise<unknown>) => {
+      // Resolve the promise to get the SQL string, then return snapshots
+      await queryPromise;
+      return snapshotsAll();
+    }),
   },
 });
 
@@ -113,7 +118,6 @@ type InvestmentsBody = {
     delta: {
       price: number | null;
       percentChange: number | null;
-      absoluteChange: number | null;
     };
   }>;
 };
@@ -184,7 +188,6 @@ describe("GET /portfolio/investments", () => {
     expect(body.investments[0]?.delta).toEqual({
       price: null,
       percentChange: null,
-      absoluteChange: null,
     });
   });
 
@@ -204,7 +207,6 @@ describe("GET /portfolio/investments", () => {
     expect(body.investments[0]?.delta).toEqual({
       price: null,
       percentChange: null,
-      absoluteChange: null,
     });
   });
 
@@ -231,7 +233,6 @@ describe("GET /portfolio/investments", () => {
     expect(body.investments[0]?.delta.price).toBe(5);
     // (110 - 105) / 105 * 100 ≈ 4.7619 → 4.76 (round-to-2)
     expect(body.investments[0]?.delta.percentChange).toBe(4.76);
-    expect(body.investments[0]?.delta.absoluteChange).toBe(5);
   });
 
   it("rounds percentChange to two decimal places (no float-tail digits)", async () => {
@@ -305,7 +306,6 @@ describe("GET /portfolio/investments", () => {
     expect(body.investments[0]?.delta).toEqual({
       price: null,
       percentChange: null,
-      absoluteChange: null,
     });
   });
 
@@ -362,6 +362,64 @@ describe("GET /portfolio/investments", () => {
     expect(body.investments[0]?.latestSnapshot?.timestamp).toBe(
       "2026-07-02T12:34:56.000Z",
     );
+  });
+
+  it("ensures each investment gets exactly its 2 most recent snapshots even if many snapshots exist", async () => {
+    const inv1 = makeInvestment({ id: 1, ticker: "AAPL" });
+    const inv2 = makeInvestment({ id: 2, ticker: "MSFT" });
+    investmentsAll.mockImplementation(() => [inv1, inv2]);
+
+    snapshotsAll.mockImplementation(() => [
+      // AAPL: 3 snapshots, should get 2
+      makeSnapshot({
+        id: 1,
+        investmentId: 1,
+        price: 10,
+        timestamp: new Date("2026-07-03"),
+      }), // Latest
+      makeSnapshot({
+        id: 2,
+        investmentId: 1,
+        price: 9,
+        timestamp: new Date("2026-07-02"),
+      }), // Previous
+      makeSnapshot({
+        id: 3,
+        investmentId: 1,
+        price: 8,
+        timestamp: new Date("2026-07-01"),
+      }), // Should be ignored
+      // MSFT: 3 snapshots, should get 2
+      makeSnapshot({
+        id: 4,
+        investmentId: 2,
+        price: 20,
+        timestamp: new Date("2026-07-03"),
+      }), // Latest
+      makeSnapshot({
+        id: 5,
+        investmentId: 2,
+        price: 19,
+        timestamp: new Date("2026-07-02"),
+      }), // Previous
+      makeSnapshot({
+        id: 6,
+        investmentId: 2,
+        price: 18,
+        timestamp: new Date("2026-07-01"),
+      }), // Should be ignored
+    ]);
+
+    const body = await jsonBody(await portfolio.request("/investments"));
+    expect(body.investments).toHaveLength(2);
+
+    const aapl = body.investments.find((i) => i.ticker === "AAPL");
+    expect(aapl?.latestSnapshot?.price).toBe(10);
+    expect(aapl?.previousSnapshot?.price).toBe(9);
+
+    const msft = body.investments.find((i) => i.ticker === "MSFT");
+    expect(msft?.latestSnapshot?.price).toBe(20);
+    expect(msft?.previousSnapshot?.price).toBe(19);
   });
 });
 

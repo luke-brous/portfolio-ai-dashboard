@@ -2,10 +2,10 @@ import { apiGet } from "../lib/api";
 import { useQuery } from "@tanstack/react-query";
 
 type SyncRun = {
-    at: string,
-    ok: boolean,
-    note: string,
-}
+  at: string;
+  ok: boolean;
+  note: string;
+};
 
 type SyncStatusResponse = {
   lastRun: SyncRun | null;
