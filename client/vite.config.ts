@@ -13,6 +13,7 @@ export default defineConfig({
       "/summarize": "http://localhost:3000",
       "/export": "http://localhost:3000",
       "/portfolio": "http://localhost:3000",
+      "/crm": "http://localhost:3000",
     },
   },
 });

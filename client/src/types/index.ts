@@ -62,3 +62,12 @@ export interface InvestmentwithSnapshot extends Investment {
   previousSnapshot: InvestmentSnapshot | null;
   delta: Investment["delta"];
 }
+
+export interface Nonprofit {
+  id: number;
+  name: string;
+  contactEmail: string | null;
+  grantCycleDates: string | null;
+  grantAmount: number | null;
+  grantStatus: string | null;
+}

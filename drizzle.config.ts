@@ -1,18 +1,19 @@
 import { defineConfig } from "drizzle-kit";
 import "dotenv/config";
 
+const dbFileName = process.env.DB_FILE_NAME;
+
+if (!dbFileName) {
+  throw new Error("DB_FILE_NAME environment variable is not set");
+}
+
 export default defineConfig({
   schema: "./server/db/schema.ts",
-  // schema: './db/schema.ts',
 
   out: "./server/db/migrations",
-  // out: './db/migrations',
 
   dialect: "sqlite",
   dbCredentials: {
-    url:
-      // @ts-expect-error: process is not typed in global scope
-      process.env.DB_FILE_NAME ||
-      "/workspaces/portfolio-ai-dashboard/sqlite.db",
+    url: dbFileName,
   },
 });

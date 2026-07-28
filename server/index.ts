@@ -5,6 +5,7 @@ import auth from "./routes/auth";
 import gmail from "./routes/gmail";
 import summarize from "./routes/summarize";
 import portfolio from "./routes/portfolio";
+import crm from "./routes/crm";
 import { logger } from "./logger";
 import { syncMarketData } from "./db/syncMarketData";
 import {
@@ -26,8 +27,7 @@ const app = new Hono();
 app.use(
   "*",
   cors({
-    origin:
-      "https://opulent-space-happiness-g45wwqj7pjwq3v56w-5173.app.github.dev",
+    origin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
     credentials: true,
   }),
 );
@@ -60,6 +60,7 @@ app.route("/auth", auth);
 app.route("/gmail", gmail);
 app.route("/summarize", summarize);
 app.route("/portfolio", portfolio);
+app.route("/crm", crm);
 
 // ---------------------------------------------------------------------------
 // Scheduled Finnhub sync.
