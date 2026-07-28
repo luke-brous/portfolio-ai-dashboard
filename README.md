@@ -1,281 +1,196 @@
-# Mail Brief
+# Portfolio AI Dashboard
 
-A full-stack personal dashboard for nonprofit correspondence and portfolio
-intelligence.
+A personal-use web app that combines Gmail AI briefings, live market
+intelligence, and nonprofit foundation management behind a single
+Google-authenticated dashboard.
 
-- **Mail Brief tab** — Connect a Gmail account via OAuth, pick a label + date
-  range, and Gemini summarizes each matching email into a short brief.
-  Results live in a React dashboard and can be exported to CSV.
-- **Advisor Intelligence tab** *(foundation only)* — Tracks ~45 stock tickers
-  in a local SQLite database. The schema, the scheduled daily Finnhub price +
-  news sync, and the read API (`/portfolio/investments`, `/portfolio/news`,
-  `/portfolio/sync-status`) are wired up. The frontend tab itself, SEC
-  filings detection, and Gemini-distilled filing insights are still pending
-  — see [`REWORK.md`](./REWORK.md) §5 and [`advisor.md`](./advisor.md) for
-  the plan.
+> FYI — `.gitignore` ends with the catch-all `*.md` rule. To commit this
+> README, add a `!README.md` exception after that line.
 
-The detail of how requests flow through the system is documented in
-[`WORKFLOW.md`](./WORKFLOW.md). The broader roadmap is captured in
-[`REWORK.md`](./REWORK.md).
+## Features
 
-## Stack
+- **Mailbrief** — Pick a Gmail label and date range, then generate a bulk
+  AI briefing of every thread in that window using Google Gemini.
+- **Advisor** — Live portfolio holdings with latest prices, intraday
+  delta vs. the previous snapshot, and recent per-ticker headlines.
+  Quotes and news are pulled from Finnhub.
+- **CRM** — Foundation management view of the nonprofits you fund,
+  including grant cycles, amounts, and statuses. Server-paginated.
+- **Auth** — Google OAuth; sessions are httpOnly cookies backed by an
+  in-memory store with a server-side `expiresAt`.
 
-**Backend**
-- [Bun](https://bun.sh) runtime + test runner
-- [Hono](https://hono.dev) HTTP framework
-- [Drizzle ORM](https://orm.drizzle.team) on SQLite (Bun's built-in driver)
-- [Zod](https://zod.dev) (via `@hono/zod-validator`) for query/body validation
-- [`googleapis`](https://www.npmjs.com/package/googleapis) + `google-auth-library` for OAuth + Gmail
-- [`pino`](https://getpino.io) for structured logging
+## Tech stack
 
-**Frontend**
-- React 18 + [Vite](https://vitejs.dev) + TypeScript
-- [`react-router-dom`](https://reactrouter.com) v7 for routing
-- [`@tanstack/react-query`](https://tanstack.com/query) for fetching & caching
-- [Tailwind CSS](https://tailwindcss.com) (loaded from the CDN in `index.html`)
+- **Runtime / package manager** — [Bun](https://bun.sh)
+- **Backend** — [Hono](https://hono.dev), [Drizzle ORM](https://orm.drizzle.team)
+  (SQLite via `bun-sqlite`), [Pino](https://getpino.io) logger,
+  [Zod](https://zod.dev) validation, [`googleapis`](https://www.npmjs.com/package/googleapis)
+  for Gmail.
+- **Frontend** — React 18, Vite, React Router v7, TanStack Query.
+- **Integrations** — Google (Gmail), Finnhub (quotes + company news),
+  Google Gemini (email summarization).
 
-**External APIs**
-- Google OAuth 2.0 (`gmail.readonly` scope only)
-- [Gemini](https://aistudio.google.com) — `gemini-3.1-flash-lite`
-- [Finnhub](https://finnhub.io) — quotes and company news (free tier, 60 req/min)
+## Repository layout
+
+```
+.
+├── server/         # Hono API + SQLite + scheduled Finnhub sync
+│   ├── routes/     # auth, gmail, summarize, portfolio, crm
+│   ├── lib/        # gemini, finnhub, gmail, session, rateLimit, …
+│   └── db/         # Drizzle schema + migrations + seed
+└── client/         # Vite + React SPA
+    └── src/
+        ├── pages/  # Login, Landing, Home, Mailbrief, Advisor, CRM, NotFound
+        ├── hooks/  # TanStack-Query data hooks (one per feature)
+        └── components/
+```
+
+During development the Vite dev server proxies `/auth`, `/gmail`,
+`/summarize`, `/portfolio`, and `/crm` through to the Bun backend on
+port `3000` (see `client/vite.config.ts`).
 
 ## Prerequisites
 
-You'll need accounts and credentials for each of the following:
+- [Bun](https://bun.sh) — CI uses [`oven-sh/setup-bun@v2`](https://github.com/oven-sh/setup-bun) with `bun-version: latest`, and the lockfile is `bun@1.3.x`, so any current Bun works.
+- A Google Cloud project with the Gmail API enabled and an OAuth 2.0
+  **Web application** credential.
+- A [Finnhub](https://finnhub.io) API key (free tier is sufficient).
+- A [Google Gemini](https://aistudio.google.com) API key.
 
-1. **Google Cloud project** with the Gmail API enabled and an OAuth 2.0 *Web
-   application* client ID. Add your redirect URI (see `.env.example` for the
-   GitHub Codespaces format, or use `http://localhost:3000/auth/callback` for
-   local dev).
-2. **Gemini API key** — free at [aistudio.google.com](https://aistudio.google.com).
-3. **Finnhub API key** — free at [finnhub.io](https://finnhub.io).
-4. **Bun** installed locally (`curl -fsSL https://bun.sh/install | bash`).
-
-## Status
-
-**Beta** — the Mail Brief tab (Gmail → Gemini summarization → React dashboard)
-is functional live: connect Gmail, pick a label + range, get Gemini
-summaries rendered as cards, and export to CSV. Summaries are generated
-per-request and held in React state only — `POST /summarize` does **not**
-persist them to the `reports` table, so refreshing falls back to the raw
-emails. The Advisor Intelligence tab has its foundation
-in place: the `investments`, `price_snapshots`, and `news_items` schema and
-seed data, the scheduled daily Finnhub sync (`server/db/syncMarketData.ts`),
-the shared sync-state module (`server/lib/syncState.ts`), and the read API
-under `server/routes/portfolio.ts` (`/investments`, `/news`,
-`/sync-status`). What is **not** built yet:
-
-- The Advisor Intelligence UI tab (no `/advisor` route in
-  `client/src/App.tsx`, no read-API consumers in `client/src/hooks`).
-- SEC filings detection (`/stock/filings`) and the `filings` /
-  `filing_insights` / `last_filings_seen` tables.
-- Gemini-distilled filing insights inside the sync pipeline.
-- The CSV export route (`server/routes/export.ts`) — `GET /export/csv`
-  still returns `"TODO: generate CSV export"`.
-
-Known limitations:
-- Sessions are stored in memory and lost on backend restart.
-- The CORS origin is hardcoded to a specific GitHub Codespaces URL.
-- `drizzle.config.ts` honours `DB_FILE_NAME` but falls back to a
-  Codespace-specific absolute path (`/workspaces/gmail-summarizer/sqlite.db`)
-  when the env var is unset. On a non-Codespace machine without
-  `DB_FILE_NAME` set, `npx drizzle-kit push` will silently create a new DB
-  at that path — set the env var explicitly.
-- The frontend uses CDN-bundled Tailwind (no PostCSS build), inline styles
-  in `SummaryCard.tsx`, and `ExportButton.tsx` has no Tailwind classes at
-  all — fine for dev but not production-grade.
-
-## Setup
+## Install
 
 ```bash
-# 1. Install dependencies (root + client)
 bun install
-cd client && bun install && cd ..
-
-# 2. Configure environment
-cp .env.example .env       # then fill in the values below
-
-# 3. Initialize the SQLite database
-npx drizzle-kit push        # creates tables from server/db/schema.ts
-
-# 4. (Optional) Seed nonprofits + portfolio tickers
-#    Requires: server/db/data/Portfolio Overview July 1st 2026.csv
-#    (gitignored — your real portfolio file goes here)
-bun server/db/seed.ts --confirm
+bun --cwd server install
+bun --cwd client install
 ```
 
-### Environment variables
+(Or just `bun install` at the root if your Bun handles nested
+workspaces — both `server/` and `client/` have their own lockfiles.)
 
-Set these in your `.env` (server-side) and in the client build if you use a
-non-default backend origin.
+## Environment variables
 
-**Server (`server/.env` or root `.env`)**
+Create a `.env` file at the project root. All server variables are
+loaded by Bun via `dotenv`; the client variables are read by Vite at
+build/dev time and must be prefixed with `VITE_`.
 
-| Var | Purpose |
-|---|---|
-| `GOOGLE_CLIENT_ID` | OAuth 2.0 client ID from Google Cloud |
-| `GOOGLE_CLIENT_SECRET` | OAuth 2.0 client secret |
-| `GOOGLE_REDIRECT_URI` | Must match what you registered in Cloud Console |
-| `GEMINI_API_KEY` | Gemini free-tier key |
-| `FINNHUB_API_KEY` | Finnhub free-tier key |
-| `DB_FILE_NAME` | Absolute path to your SQLite database file |
-| `FRONTEND_URL` | Where to redirect after OAuth (default `http://localhost:5173`) |
+| Variable             | Used by        | Required | Purpose                                                                                           |
+| -------------------- | -------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `DB_FILE_NAME`       | server, Drizzle | ✅       | Path to the SQLite file. e.g. `./sqlite.db`. **Required** by `drizzle.config.ts` (no silent fallback). |
+| `CORS_ORIGIN`        | server         | ❌       | Default `http://localhost:5173`.                                                                  |
+| `FRONTEND_URL`       | server (auth)  | ❌       | Where the auth callback redirects you. Default `http://localhost:5173`.                            |
+| `GOOGLE_CLIENT_ID`   | server         | ✅       | OAuth client from Google Cloud.                                                                   |
+| `GOOGLE_CLIENT_SECRET` | server       | ✅       | OAuth client secret.                                                                              |
+| `GOOGLE_REDIRECT_URI` | server        | ✅       | Must match what you registered in Google Cloud (e.g. `http://localhost:3000/auth/callback`).      |
+| `GEMINI_API_KEY`     | server         | ✅       | Used by `/summarize`.                                                                             |
+| `FINNHUB_API_KEY`    | server         | ✅       | Used by `/portfolio` + the background sync.                                                       |
+| `FINNHUB_SYNC_ENABLED` | server       | ❌       | Set to `0` to disable the boot + 24 h background sync (useful in CI / tests).                      |
+| `SEED_FILE`          | server (seed)  | ❌       | Reserved path for the per-user seed (`server/db/seed.ts`, gitignored). Not yet wired to a runner — invoke the seed manually. The shipping `seed_script.ts` only inserts placeholder rows. |
+| `VITE_BACKEND_URL`   | client         | ✅       | Base URL of the Hono API. e.g. `http://localhost:3000`. Replaces proxy calls in production.       |
 
-**Client (`client/.env`)**
-
-| Var | Purpose |
-|---|---|
-| `VITE_BACKEND_URL` | Absolute URL of the Hono backend. Required for hooks that read it directly (`useAuth`, `useEmails`, `useLabels`, `useSummarize`, plus manual fetches in `Dashboard.tsx`) — they construct URLs as `${VITE_BACKEND_URL}/...` with no fallback. Other call sites use `client/src/lib/api.ts`, which calls `fetch(path)` with a relative path and rides the Vite dev proxy. Note: `client/vite.config.ts`'s proxy map currently covers `/auth`, `/gmail`, `/summarize`, `/export` but **not** `/portfolio` — when the Advisor tab lands, those requests will bypass the proxy and must use `VITE_BACKEND_URL`. |
-
-## Running the app
+## Development
 
 ```bash
-# Backend on http://localhost:3000
-bun run dev:server
-
-# Frontend on http://localhost:5173 (separate terminal)
-bun run dev:client
-
-# Run both in parallel
-bun run dev
+bun run dev           # runs server (:3000) and client (:5173) in parallel
+bun run dev:server    # bun --watch server/index.ts
+bun run dev:client    # vite
 ```
 
-Open <http://localhost:5173> and click **Connect Gmail** to begin.
+Open <http://localhost:5173> and click **Connect Gmail** to start the
+OAuth flow.
 
-### Other scripts
+## Scripts
 
-| Script | Effect |
-|---|---|
-| `bun run typecheck` | `tsc --noEmit` over the server sources |
-| `bun run test` | Bun test runner (server-side tests only) |
-| `bun run format` | `bun format` over the codebase |
-| `npx drizzle-kit push` | Apply `server/db/schema.ts` to the local SQLite file |
-| `bunx @google/gemini-cli gemini` | Interactive Gemini CLI for repo reasoning |
+| Script                    | What it does                                              |
+| ------------------------- | ---------------------------------------------------------- |
+| `bun run dev`             | Both server and client, side-by-side.                     |
+| `bun run dev:server`      | `bun --watch server/index.ts` on port `3000`.              |
+| `bun run dev:client`      | `vite` dev server on port `5173`.                          |
+| `bun run typecheck`       | `tsc --noEmit` across both workspaces.                    |
+| `bun run test`            | `bun test` for the whole repo.                            |
+| `bun run lint`            | ESLint (flat config) across the monorepo.                 |
+| `bun run format`          | Prettier write.                                           |
+| `bun run format:check`    | Prettier check (used in CI).                              |
 
-## Project structure
+## Database
 
-```
-gmail-summarizer/
-├── .env.example
-├── .gitignore
-├── .github/
-│   └── workflows/
-│       └── test.yml
-├── advisor.md            # (untracked) plan for the Advisor Intelligence tab
-├── bun.lock
-├── client/
-│   ├── bun.lock
-│   ├── index.html
-│   ├── package.json
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── components/
-│   │   │   ├── DateRangePicker.tsx
-│   │   │   ├── EmailCardSkeleton.tsx
-│   │   │   ├── ExportButton.tsx
-│   │   │   ├── Footer.tsx
-│   │   │   ├── LabelPicker.tsx
-│   │   │   ├── Skeleton.tsx
-│   │   │   └── SummaryCard.tsx
-│   │   ├── hooks/
-│   │   │   ├── useAuth.ts
-│   │   │   ├── useEmails.ts
-│   │   │   ├── useLabels.ts
-│   │   │   └── useSummarize.ts
-│   │   ├── index.css
-│   │   ├── lib/
-│   │   │   └── api.ts
-│   │   ├── main.tsx
-│   │   └── pages/
-│   │       ├── Dashboard.tsx
-│   │       └── Login.tsx
-│   ├── tsconfig.json
-│   ├── tsconfig.node.json
-│   └── vite.config.ts
-├── drizzle.config.ts
-├── GEMINI.md
-├── LICENSE
-├── package.json
-├── portfolio.md          # (untracked) notes on the Portfolio objects
-├── README.md
-├── REWORK.md
-├── server/
-│   ├── __tests__/
-│   │   ├── errorHandler.test.ts
-│   │   └── finnhub_flow.test.ts
-│   ├── db/
-│   │   ├── __tests__/
-│   │   │   └── syncMarketData.test.ts
-│   │   ├── client.ts
-│   │   ├── data/
-│   │   ├── schema.ts
-│   │   ├── seed.ts
-│   │   └── syncMarketData.ts
-│   ├── index.ts
-│   ├── lib/
-│   │   ├── __tests__/
-│   │   │   ├── gmail.test.ts
-│   │   │   └── syncState.test.ts
-│   │   ├── finnhub.ts
-│   │   ├── gemini.ts
-│   │   ├── gmail.ts
-│   │   ├── google-client.ts
-│   │   ├── session.ts
-│   │   ├── syncState.ts
-│   │   └── utils.ts
-│   ├── logger.ts
-│   ├── routes/
-│   │   ├── __tests__/
-│   │   │   ├── gmail.test.ts
-│   │   │   ├── portfolio.test.ts
-│   │   │   └── summarize.test.ts
-│   │   ├── auth.ts
-│   │   ├── export.ts
-│   │   ├── gmail.ts
-│   │   ├── portfolio.ts
-│   │   └── summarize.ts
-│   └── types/
-│       ├── finnhub.ts
-│       ├── gmail.ts
-│       └── session.ts
-├── tsconfig.json
-└── WORKFLOW.md
-```
-
-## Tests
+The schema lives in `server/db/schema.ts` and migrations are emitted
+to `server/db/migrations/`.
 
 ```bash
-bun run test
+# Generate a migration from a schema change
+bunx drizzle-kit generate
+
+# Apply the migration + open a SQLite shell manually if you need to
+sqlite3 ./sqlite.db
 ```
 
-The suite covers:
-- `server/lib/gmail.ts` — base64url decoding, header lookups, body extraction
-- `server/lib/syncState.ts` — start/finish/run recording, in-flight guard, snapshot consistency
-- `server/lib/finnhub.ts` — feed via the `__setFetchForTests` indirection
-- `server/routes/gmail.ts` — Zod validation, OAuth middleware integration
-- `server/routes/summarize.ts` — request shape, mocked Gemini responses
-- `server/routes/portfolio.ts` — investments delta math, news filtering, sync-status shape, error paths
-- `server/db/syncMarketData.ts` — same-day skip, all-zero quote rejection, news idempotency, in-flight guard
-- `server/index.ts` — global error handler sanitization (no stack-trace leak)
-- `server/__tests__/finnhub_flow.test.ts` — end-to-end Finnhub pull into the DB
+Seeding:
 
-CI runs `bun run typecheck` and `bun run test` on every push and PR to
-`main` (see `.github/workflows/test.yml`). Note: `FINNHUB_API_KEY` and
-`GEMINI_API_KEY` are **not** provided in CI — the tests stub both modules.
+```bash
+# Placeholder seed that ships with the repo (requires --confirm)
+bun server/db/seed_script.ts -- --confirm
+```
 
-## Worth knowing
+The real per-user seed (`server/db/seed.ts`) is **gitignored** so the
+public repo contains no personal data. Run it however you prefer (e.g.
+`bun server/db/seed.ts`); the `SEED_FILE` env var is reserved but not
+yet wired to an automated runner.
 
-- **Gemini's free tier may use your prompts to improve Google's models.**
-  Since this app processes nonprofit partner correspondence, be aware that
-  sensitive content in those emails should not be relied on the free tier
-  long-term.
-- **Access tokens expire (~1 hour).** The Google OAuth2 client automatically
-  refreshes them using the stored `refresh_token`, as long as
-  `access_type: "offline"` was requested at login (it is).
-- **OAuth consent screen test mode.** Until the consent screen is verified
-  by Google, only the Gmail accounts added as "test users" in Cloud Console
-  can log in.
+## Background sync
+
+`server/index.ts` schedules `syncMarketData()` (defined in
+`server/db/syncMarketData.ts`) on boot and every 24 hours. The job:
+
+- Fetches today's quote for every ticker in `investments`.
+- Pulls the last 7 days of company news for each ticker.
+- Uses a same-day guard to skip tickers with a snapshot dated today
+  (so reboots are cheap).
+- Throttles to ~30 req/min — comfortably below Finnhub's free-tier
+  60 req/min ceiling.
+- Records run results in `server/lib/syncState.ts` (`{ at, ok, note }`).
+
+Inspect the current run state via:
+
+```bash
+curl http://localhost:3000/sync/last-run         # legacy dashboard widget
+curl http://localhost:3000/portfolio/sync-status  # richer snapshot
+```
+
+Disable in CI / tests with `FINNHUB_SYNC_ENABLED=0`.
+
+## API surface (high level)
+
+| Method & path                          | Notes                                                                |
+| -------------------------------------- | -------------------------------------------------------------------- |
+| `GET /`                                | Health check → `text/plain`.                                         |
+| `GET /auth/login` → `GET /auth/callback` | Google OAuth flow (scope: `gmail.readonly`). Issues an httpOnly `sessionId` cookie on success (1 week). |
+| `GET /auth/me`                          | `{ authed: boolean }` liveness probe used by the SPA.                |
+| `GET /auth/logout`                      | Clears the server-side session + cookie, redirects to the frontend. |
+| `GET /gmail/labels`                    | List Gmail labels.                                                   |
+| `GET /gmail/messages`                 | List messages filtered by `label` + `after`/`before`/`from` (hard cap of 20 per call, returns decoded bodies). |
+| `POST /summarize`                      | Bulk-summarize an array of emails with Gemini.                       |
+| `GET /portfolio/investments`           | Holdings + latest + previous snapshot + delta (last vs. prev).       |
+| `GET /portfolio/news`                  | Recent news across holdings. Optional `?ticker=` (uppercased to match a held symbol) and `?days=N` (1–30, default 7, hard-capped at 200 rows). |
+| `GET /portfolio/sync-status`           | `{ lastRun, inFlight }` snapshot from `syncState`.                   |
+| `GET /sync/last-run`                   | Legacy endpoint kept for the dashboard "last updated" widget.        |
+| `GET /crm/nonprofits`                 | Paginated nonprofit list ordered by `name` ASC. `?limit=` (1–100, default 50) and `?offset=` (0-based, default 0); response also includes `total`. |
+
+Sessions are required for everything under `/gmail`, `/summarize`,
+`/portfolio`, and `/crm` — `server/lib/session.ts` returns a 401 with
+the same message for missing cookies, unknown cookie values, and
+expired sessions.
+
+## CI
+
+`.github/workflows/CI.yml` runs on push / PR to `main` and executes:
+
+1. Root + server installs.
+2. `bun run lint`
+3. `bun run format:check`
+4. `bun run typecheck`
+5. `bun run test` (with `DB_FILE_NAME=sqlite.db`)
 
 ## License
 
-See [`LICENSE`](./LICENSE).
+MIT — see [`LICENSE`](./LICENSE).
