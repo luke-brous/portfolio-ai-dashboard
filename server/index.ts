@@ -27,8 +27,7 @@ const app = new Hono();
 app.use(
   "*",
   cors({
-    origin:
-      "https://opulent-space-happiness-g45wwqj7pjwq3v56w-5173.app.github.dev",
+    origin: process.env.CORS_ORIGIN ?? "http://localhost:5173",
     credentials: true,
   }),
 );

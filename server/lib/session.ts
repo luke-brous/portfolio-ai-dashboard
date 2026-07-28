@@ -24,9 +24,14 @@ export function deleteSession(id: string) {
 }
 
 // Legacy helper for routes that need to access the Gmail API client.
+//
+// 401 ladder:
+//   1. No cookie present ─────────────────────→ "Not authenticated"
+//   2. Cookie present, no session in store ───→ "Not authenticated"
+//   3. Session present, past `expiresAt` ─────→ deleteSession + "Session expired"
+//   4. Otherwise ─────────────────────────────→ next()
 
 export async function requireSession(c: Context, next: Next) {
-  // fix any type
   const sessionId = getCookie(c, "sessionId") ?? getCookie(c, "session_id");
 
   if (!sessionId) {
@@ -36,6 +41,17 @@ export async function requireSession(c: Context, next: Next) {
   const session = getSession(sessionId);
 
   if (!session) {
+    return c.json({ error: "Not authenticated" }, 401);
+  }
+
+  if (Date.now() > session.expiresAt) {
+    // Eagerly drop the dead session so the next request that reuses
+    // the cookie hits the "no session in store" branch instead of
+    // re-walking the expiry check. Return the SAME 401 message as
+    // the no-cookie / unknown-cookie branches so an attacker probing
+    // with a stolen cookie can't distinguish "session once existed"
+    // from "session never existed".
+    deleteSession(sessionId);
     return c.json({ error: "Not authenticated" }, 401);
   }
 

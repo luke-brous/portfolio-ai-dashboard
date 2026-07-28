@@ -52,13 +52,18 @@ auth.get("/callback", zValidator("query", callbackSchema), async (c) => {
         refresh_token: tokens.refresh_token || undefined,
         expiry_date: tokens.expiry_date || undefined,
       },
+      // Mirror the cookie's maxAge (1 week). The cookie's `maxAge` is
+      // a browser hint; `expiresAt` is the server-side authoritative
+      // expiry. requireSession deletes expired sessions eagerly on
+      // the next request that references them — see lib/session.ts.
+      expiresAt: Date.now() + 60 * 60 * 24 * 7 * 1000,
     });
 
     // Set a session cookie
     setCookie(c, "sessionId", sessionId, {
       httpOnly: true,
       secure: true,
-      sameSite: "none",
+      sameSite: "lax",
       path: "/",
       maxAge: 60 * 60 * 24 * 7, // 1 week
     });
@@ -100,7 +105,7 @@ auth.get("/logout", (c) => {
   setCookie(c, "sessionId", "", {
     httpOnly: true,
     secure: true,
-    sameSite: "none",
+    sameSite: "lax",
     maxAge: 0, // Expire the cookie immediately
     path: "/",
   });

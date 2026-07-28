@@ -49,7 +49,13 @@ describe("Gmail routes", () => {
   test("missing 'label' parameter causes a 400 error", async () => {
     // Authenticate in order to bypass the middleware that checks for a session
     const sessionId = crypto.randomUUID();
-    createSession(sessionId, { tokens: { access_token: "mock" } });
+    createSession(sessionId, {
+      tokens: { access_token: "mock" },
+      // `expiresAt` was made required by the CRM security hardening
+      // (see server/types/session.ts); tests that call the REAL
+      // createSession must include it. 1h is plenty for the test.
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    });
 
     const res = await gmail.request("/messages", {
       headers: {

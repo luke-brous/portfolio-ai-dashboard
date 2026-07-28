@@ -1,103 +1,71 @@
 import { Hono } from "hono";
-import { google } from "googleapis";
-import { db } from "../db/client";
-import { nonprofits, reports } from "../db/schema";
-import { eq, desc } from "drizzle-orm";
-import { logger } from "../logger";
-import { requireSession } from "../lib/session";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
+import { count } from "drizzle-orm";
+import { db } from "../db/client";
+import { nonprofits } from "../db/schema";
+import { requireSession } from "../lib/session";
+import { logger } from "../logger";
 
-type GmailClient = ReturnType<typeof google.gmail>;
+// CRM (Foundation Management) routes.
+//
+// v1 surface is read-only: a single `GET /crm/nonprofits` that powers
+// the directory page. Add/edit/delete will land in a future plan; reports
+// / Gmail ingest / Gemini summaries are out of scope so attention can
+// refocus on the Advisor tab.
 
-const crm = new Hono<{ Variables: { gmailClient: GmailClient } }>();
-
-// CRM (Customer Relationship Management) routes for managing nonprofit organizations and their reports.
+const crm = new Hono();
 
 crm.use("*", requireSession);
 
-const paramsSchema = z.object({
-  id: z.coerce.number().int().positive(),
+// Hard upper bound protects against an info-disclosure risk: an
+// authenticated user dumping the whole partner roster by leaving the
+// query params empty. Default 50, max 100. `offset` is 0-based.
+const listQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
 });
 
 /**
  * GET /crm/nonprofits
  *
- * Returns every nonprofit org in alphabetical order.
+ * Returns one page of nonprofits ordered by name ASC plus a `total`
+ * count of the entire table so the client can paginate without a
+ * second request.
  */
-crm.get("/nonprofits", async (c) => {
+crm.get("/nonprofits", zValidator("query", listQuerySchema), async (c) => {
+  const { limit, offset } = c.req.valid("query");
+
   try {
-    const rows = db.select().from(nonprofits).orderBy(nonprofits.name).all();
+    const rows = db
+      .select()
+      .from(nonprofits)
+      .orderBy(nonprofits.name)
+      .limit(limit)
+      .offset(offset)
+      .all();
+
+    const totalRow = db.select({ c: count() }).from(nonprofits).get();
+    const total = totalRow?.c ?? 0;
 
     return c.json({
       count: rows.length,
+      total,
+      limit,
+      offset,
       nonprofits: rows,
     });
   } catch (error) {
-    logger.error(`Error fetching from nonprofits table: ${String(error)}`);
+    // Pino structured logging: lets the serializer escape the error
+    // object rather than coercing it through `String(error)`, which
+    // can paste raw SQL / parameter values (incl. nonprofit names)
+    // into the log line.
+    logger.error(
+      { err: error, path: c.req.path },
+      "Error fetching from nonprofits table",
+    );
     return c.json({ message: "Error fetching nonprofits" }, 500);
   }
 });
-
-/**
- * GET /crm/nonprofits/:id/reports
- *
- * Returns every report for one nonprofit, newest first. 404 if the
- * nonprofit doesn't exist; 200 with `{ count: 0, reports: [] }` if it
- * exists but has no reports yet.
- */
-crm.get(
-  "/nonprofits/:id/reports",
-  zValidator("param", paramsSchema),
-  async (c) => {
-    const { id } = c.req.valid("param");
-
-    try {
-      const nonprofitRows = db
-        .select()
-        .from(nonprofits)
-        .where(eq(nonprofits.id, id))
-        .limit(1)
-        .all();
-
-      if (nonprofitRows.length === 0) {
-        return c.json({ error: "Nonprofit not found" }, 404);
-      }
-
-      const reportRows = db
-        .select()
-        .from(reports)
-        .where(eq(reports.nonprofitId, id))
-        .orderBy(desc(reports.date))
-        .all();
-
-      const reportDTOs = reportRows.map((r) => ({
-        id: r.id,
-        nonprofitId: r.nonprofitId,
-        messageId: r.messageId,
-        summary: r.summary,
-        date: r.date.toISOString(),
-      }));
-
-      return c.json({
-        nonprofitId: id,
-        count: reportDTOs.length,
-        reports: reportDTOs,
-      });
-    } catch (error) {
-      logger.error(
-        `Error fetching reports for nonprofit ${id}: ${String(error)}`,
-      );
-      return c.json({ message: "Error fetching reports" }, 500);
-    }
-  },
-);
-
-// Placeholder endpoint for §6.3 — intentionally returns 501 so a client
-// hitting it before it's implemented gets a clear "not yet built"
-// signal instead of 200 + empty body.
-crm.post("/nonprofits/:id/reports/generate", (c) =>
-  c.json({ message: "Not implemented" }, 501),
-);
 
 export default crm;
