@@ -4,9 +4,6 @@ A personal-use web app that combines Gmail AI briefings, live market
 intelligence, and nonprofit foundation management behind a single
 Google-authenticated dashboard.
 
-> FYI — `.gitignore` ends with the catch-all `*.md` rule. To commit this
-> README, add a `!README.md` exception after that line.
-
 ## Features
 
 - **Mailbrief** — Pick a Gmail label and date range, then generate a bulk
@@ -74,19 +71,19 @@ Create a `.env` file at the project root. All server variables are
 loaded by Bun via `dotenv`; the client variables are read by Vite at
 build/dev time and must be prefixed with `VITE_`.
 
-| Variable             | Used by        | Required | Purpose                                                                                           |
-| -------------------- | -------------- | -------- | ------------------------------------------------------------------------------------------------- |
-| `DB_FILE_NAME`       | server, Drizzle | ✅       | Path to the SQLite file. e.g. `./sqlite.db`. **Required** by `drizzle.config.ts` (no silent fallback). |
-| `CORS_ORIGIN`        | server         | ❌       | Default `http://localhost:5173`.                                                                  |
-| `FRONTEND_URL`       | server (auth)  | ❌       | Where the auth callback redirects you. Default `http://localhost:5173`.                            |
-| `GOOGLE_CLIENT_ID`   | server         | ✅       | OAuth client from Google Cloud.                                                                   |
-| `GOOGLE_CLIENT_SECRET` | server       | ✅       | OAuth client secret.                                                                              |
-| `GOOGLE_REDIRECT_URI` | server        | ✅       | Must match what you registered in Google Cloud (e.g. `http://localhost:3000/auth/callback`).      |
-| `GEMINI_API_KEY`     | server         | ✅       | Used by `/summarize`.                                                                             |
-| `FINNHUB_API_KEY`    | server         | ✅       | Used by `/portfolio` + the background sync.                                                       |
-| `FINNHUB_SYNC_ENABLED` | server       | ❌       | Set to `0` to disable the boot + 24 h background sync (useful in CI / tests).                      |
-| `SEED_FILE`          | server (seed)  | ❌       | Reserved path for the per-user seed (`server/db/seed.ts`, gitignored). Not yet wired to a runner — invoke the seed manually. The shipping `seed_script.ts` only inserts placeholder rows. |
-| `VITE_BACKEND_URL`   | client         | ✅       | Base URL of the Hono API. e.g. `http://localhost:3000`. Replaces proxy calls in production.       |
+| Variable               | Used by         | Required | Purpose                                                                                                                                                                                   |
+| ---------------------- | --------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DB_FILE_NAME`         | server, Drizzle | ✅       | Path to the SQLite file. e.g. `./sqlite.db`. **Required** by `drizzle.config.ts` (no silent fallback).                                                                                    |
+| `CORS_ORIGIN`          | server          | ❌       | Default `http://localhost:5173`.                                                                                                                                                          |
+| `FRONTEND_URL`         | server (auth)   | ❌       | Where the auth callback redirects you. Default `http://localhost:5173`.                                                                                                                   |
+| `GOOGLE_CLIENT_ID`     | server          | ✅       | OAuth client from Google Cloud.                                                                                                                                                           |
+| `GOOGLE_CLIENT_SECRET` | server          | ✅       | OAuth client secret.                                                                                                                                                                      |
+| `GOOGLE_REDIRECT_URI`  | server          | ✅       | Must match what you registered in Google Cloud (e.g. `http://localhost:3000/auth/callback`).                                                                                              |
+| `GEMINI_API_KEY`       | server          | ✅       | Used by `/summarize`.                                                                                                                                                                     |
+| `FINNHUB_API_KEY`      | server          | ✅       | Used by `/portfolio` + the background sync.                                                                                                                                               |
+| `FINNHUB_SYNC_ENABLED` | server          | ❌       | Set to `0` to disable the boot + 24 h background sync (useful in CI / tests).                                                                                                             |
+| `SEED_FILE`            | server (seed)   | ❌       | Reserved path for the per-user seed (`server/db/seed.ts`, gitignored). Not yet wired to a runner — invoke the seed manually. The shipping `seed_script.ts` only inserts placeholder rows. |
+| `VITE_BACKEND_URL`     | client          | ✅       | Base URL of the Hono API. e.g. `http://localhost:3000`. Replaces proxy calls in production.                                                                                               |
 
 ## Development
 
@@ -101,16 +98,16 @@ OAuth flow.
 
 ## Scripts
 
-| Script                    | What it does                                              |
-| ------------------------- | ---------------------------------------------------------- |
-| `bun run dev`             | Both server and client, side-by-side.                     |
-| `bun run dev:server`      | `bun --watch server/index.ts` on port `3000`.              |
-| `bun run dev:client`      | `vite` dev server on port `5173`.                          |
-| `bun run typecheck`       | `tsc --noEmit` across both workspaces.                    |
-| `bun run test`            | `bun test` for the whole repo.                            |
-| `bun run lint`            | ESLint (flat config) across the monorepo.                 |
-| `bun run format`          | Prettier write.                                           |
-| `bun run format:check`    | Prettier check (used in CI).                              |
+| Script                 | What it does                                  |
+| ---------------------- | --------------------------------------------- |
+| `bun run dev`          | Both server and client, side-by-side.         |
+| `bun run dev:server`   | `bun --watch server/index.ts` on port `3000`. |
+| `bun run dev:client`   | `vite` dev server on port `5173`.             |
+| `bun run typecheck`    | `tsc --noEmit` across both workspaces.        |
+| `bun run test`         | `bun test` for the whole repo.                |
+| `bun run lint`         | ESLint (flat config) across the monorepo.     |
+| `bun run format`       | Prettier write.                               |
+| `bun run format:check` | Prettier check (used in CI).                  |
 
 ## Database
 
@@ -133,9 +130,8 @@ bun server/db/seed_script.ts -- --confirm
 ```
 
 The real per-user seed (`server/db/seed.ts`) is **gitignored** so the
-public repo contains no personal data. Run it however you prefer (e.g.
-`bun server/db/seed.ts`); the `SEED_FILE` env var is reserved but not
-yet wired to an automated runner.
+public repo contains no personal data. Point `SEED_FILE` at it in your
+local `.env` and invoke it however you prefer.
 
 ## Background sync
 
@@ -159,22 +155,22 @@ curl http://localhost:3000/portfolio/sync-status  # richer snapshot
 
 Disable in CI / tests with `FINNHUB_SYNC_ENABLED=0`.
 
-## API surface (high level)
+## API surface
 
-| Method & path                          | Notes                                                                |
-| -------------------------------------- | -------------------------------------------------------------------- |
-| `GET /`                                | Health check → `text/plain`.                                         |
-| `GET /auth/login` → `GET /auth/callback` | Google OAuth flow (scope: `gmail.readonly`). Issues an httpOnly `sessionId` cookie on success (1 week). |
-| `GET /auth/me`                          | `{ authed: boolean }` liveness probe used by the SPA.                |
-| `GET /auth/logout`                      | Clears the server-side session + cookie, redirects to the frontend. |
-| `GET /gmail/labels`                    | List Gmail labels.                                                   |
-| `GET /gmail/messages`                 | List messages filtered by `label` + `after`/`before`/`from` (hard cap of 20 per call, returns decoded bodies). |
-| `POST /summarize`                      | Bulk-summarize an array of emails with Gemini.                       |
-| `GET /portfolio/investments`           | Holdings + latest + previous snapshot + delta (last vs. prev).       |
-| `GET /portfolio/news`                  | Recent news across holdings. Optional `?ticker=` (uppercased to match a held symbol) and `?days=N` (1–30, default 7, hard-capped at 200 rows). |
-| `GET /portfolio/sync-status`           | `{ lastRun, inFlight }` snapshot from `syncState`.                   |
-| `GET /sync/last-run`                   | Legacy endpoint kept for the dashboard "last updated" widget.        |
-| `GET /crm/nonprofits`                 | Paginated nonprofit list ordered by `name` ASC. `?limit=` (1–100, default 50) and `?offset=` (0-based, default 0); response also includes `total`. |
+| Method & path                            | Notes                                                                                                                                              |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /`                                  | Health check → `text/plain`.                                                                                                                       |
+| `GET /auth/login` → `GET /auth/callback` | Google OAuth flow (scope: `gmail.readonly`). Issues an httpOnly `sessionId` cookie on success (1 week).                                            |
+| `GET /auth/me`                           | `{ authed: boolean }` liveness probe used by the SPA.                                                                                              |
+| `GET /auth/logout`                       | Clears the server-side session + cookie, redirects to the frontend.                                                                                |
+| `GET /gmail/labels`                      | List Gmail labels.                                                                                                                                 |
+| `GET /gmail/messages`                    | List messages filtered by `label` + `after`/`before`/`from` (hard cap of 20 per call, returns decoded bodies).                                     |
+| `POST /summarize`                        | Bulk-summarize an array of emails with Gemini.                                                                                                     |
+| `GET /portfolio/investments`             | Holdings + latest + previous snapshot + delta (last vs. prev).                                                                                     |
+| `GET /portfolio/news`                    | Recent news across holdings. Optional `?ticker=` (uppercased to match a held symbol) and `?days=N` (1–30, default 7, hard-capped at 200 rows).     |
+| `GET /portfolio/sync-status`             | `{ lastRun, inFlight }` snapshot from `syncState`.                                                                                                 |
+| `GET /sync/last-run`                     | Legacy endpoint kept for the dashboard "last updated" widget.                                                                                      |
+| `GET /crm/nonprofits`                    | Paginated nonprofit list ordered by `name` ASC. `?limit=` (1–100, default 50) and `?offset=` (0-based, default 0); response also includes `total`. |
 
 Sessions are required for everything under `/gmail`, `/summarize`,
 `/portfolio`, and `/crm` — `server/lib/session.ts` returns a 401 with
