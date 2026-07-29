@@ -143,3 +143,6 @@ graphify-out/
 
 # claude directory
 .claude/
+
+# Persisted session store — contains live Google OAuth access/refresh tokens
+sessions.json

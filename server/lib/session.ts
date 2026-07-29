@@ -1,27 +1,25 @@
-// Minimal in-memory session store, keyed by a random session id
-// stored in a cookie. Good enough for a personal-use tool.
-// A production version would use Redis or a database instead,
-// since this resets whenever the server restarts.
+// Session store, keyed by a random session id stored in a cookie.
+//
+// The mapping itself lives in a small JSON file on disk via
+// `./sessionStore`. We previously held it in a module-level Map; that
+// was fine while the server never restarted, but `--watch` / Bun HMR
+// / dev restarts would silently drop every active session because
+// `requireSession` couldn't find the session id in the freshly-emptied
+// map even though the browser still held a valid cookie.
+//
+// Persisting to disk keeps the same `createSession` / `getSession` /
+// `deleteSession` API so existing tests' `mock.module("../../lib/session", ...)`
+// keeps working without modification.
 
-import type { SessionData } from "../types/session";
+import { createSession, deleteSession, getSession } from "./sessionStore";
 import { google } from "googleapis";
 import { getOAuthClient } from "./google-client";
 import { getCookie } from "hono/cookie";
 import { Context, Next } from "hono";
 
-const sessions = new Map<string, SessionData>();
-
-export function createSession(id: string, data: SessionData) {
-  sessions.set(id, data);
-}
-
-export function getSession(id: string): SessionData | undefined {
-  return sessions.get(id);
-}
-
-export function deleteSession(id: string) {
-  sessions.delete(id);
-}
+// Re-export the helpers so existing `import { createSession } from "../lib/session"`
+// call sites continue to compile. The runtime is now file-backed.
+export { createSession, deleteSession, getSession };
 
 // Legacy helper for routes that need to access the Gmail API client.
 //
