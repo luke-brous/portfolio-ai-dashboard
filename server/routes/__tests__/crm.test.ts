@@ -2,11 +2,37 @@ import { describe, it, expect, mock, beforeEach, afterAll } from "bun:test";
 import { getCookie } from "hono/cookie";
 import type { Context, Next } from "hono";
 import crypto from "crypto";
+import * as drizzleOrm from "drizzle-orm";
 
 import crm from "../crm";
 import { nonprofits } from "../../db/schema";
 import { createSession } from "../../lib/session";
 import type { SessionData } from "../../types/session";
+
+// ---------- drizzle-orm mock --------------------------------------------------------
+//
+// Production calls `eq(nonprofits.id, X)` inside `.where(...)`. Mocking
+// `eq` itself with a predictable token shape keeps our where-mock
+// dispatch independent of Drizzle internals (the value lives at index 2
+// of `queryChunks`, wrapped in a `Param`). Other drizzle exports
+// (asc/desc/and/count/etc.) keep their real implementations.
+mock.module("drizzle-orm", () => ({
+  ...drizzleOrm,
+  eq: (col: unknown, val: unknown) => ({ __isMockedEq: true as const, col, val }),
+}));
+
+type MockedEqToken = { __isMockedEq: true; col: unknown; val: unknown };
+
+function asMockedEq(condition: unknown): MockedEqToken | null {
+  if (
+    condition &&
+    typeof condition === "object" &&
+    (condition as { __isMockedEq?: unknown }).__isMockedEq === true
+  ) {
+    return condition as MockedEqToken;
+  }
+  return null;
+}
 
 // ---------- Module mocks ----------------------------------------------------------
 //
@@ -49,15 +75,31 @@ mock.module("../../lib/session", () => ({
 
 const nonprofitsAll = mock(() => [] as Array<typeof nonprofits.$inferSelect>);
 
+// Verifiable insert/update audit so each test can assert on what the
+// production handler actually wrote without re-reading rows out of a
+// shared mocked table. `updateOps` is keyed by id and stores the
+// cumulative patch (PATCH calls are observed destructured into the row).
+const insertReturn = mock(
+  (
+    _table: unknown,
+    values: Record<string, unknown>,
+  ): Array<Record<string, unknown>> => {
+    // Simulate autoincrement id so tests can assert on it.
+    const id = 800 + insertReturn.mock.calls.length;
+    return [{ id, ...values }];
+  },
+);
+
 mock.module("../../db/client", () => ({
   db: {
     select: mock((opts?: unknown) => {
-      // Two call shapes hit the route:
-      //   1. db.select({ c: count() }).from(<table>).get()  -> total
+      // Three call shapes hit the route now:
+      //   1. db.select({ c: count() }).from(<table>).get()  → total
       //      (opts is an object with `c` key)
-      //   2. db.select().from(<table>).orderBy(<col>)
-      //            .limit(N).offset(M).all()                -> page
-      //      (opts is undefined)
+      //   2. db.select().from(<table>).where(eq(<id>, X))
+      //            .get()                                   → lookup by id (PATCH)
+      //   3. db.select().from(<table>).orderBy(<col>)
+      //            .limit(N).offset(M).all()                 → page (GET)
       if (opts && typeof opts === "object" && "c" in opts) {
         return {
           from: () => ({
@@ -73,6 +115,20 @@ mock.module("../../db/client", () => ({
             );
           }
           return {
+            // PATCH lookup: returns the row matching eq(id, X) or null.
+            where: (condition: unknown) => {
+              const eq = asMockedEq(condition);
+              if (!eq || eq.col !== nonprofits.id || typeof eq.val !== "number") {
+                throw new Error(
+                  `Unexpected where condition in crm test mock: ${String(condition)}`,
+                );
+              }
+              const id = eq.val;
+              return {
+                get: () =>
+                  nonprofitsAll().find((r) => r.id === id) ?? null,
+              };
+            },
             // Verify the production route actually passes
             // `nonprofits.name` to `.orderBy(...)`. Without this guard,
             // the ASC test would still pass even if the route stopped
@@ -99,6 +155,54 @@ mock.module("../../db/client", () => ({
             },
           };
         },
+      };
+    }),
+    insert: mock((table: unknown) => {
+      if (table !== nonprofits) {
+        throw new Error(
+          `Unexpected insert target in crm test mock: ${String(table)}`,
+        );
+      }
+      return {
+        values: (record: Record<string, unknown>) => ({
+          returning: () => ({
+            all: () => insertReturn(table, record),
+          }),
+        }),
+      };
+    }),
+    update: mock((table: unknown) => {
+      if (table !== nonprofits) {
+        throw new Error(
+          `Unexpected update target in crm test mock: ${String(table)}`,
+        );
+      }
+      return {
+        set: (patch: Partial<Record<string, unknown>>) => ({
+          where: (condition: unknown) => {
+            const eq = asMockedEq(condition);
+            if (!eq || eq.col !== nonprofits.id || typeof eq.val !== "number") {
+              throw new Error(
+                `Update where called with bad condition: ${String(condition)}`,
+              );
+            }
+            const id = eq.val;
+            return {
+              returning: () => ({
+                all: () => {
+                  const existing = nonprofitsAll().find(
+                    (r) => r.id === id,
+                  );
+                  if (!existing) return [];
+                  // Apply the patch onto a clone so we don't mutate
+                  // the fixture (the next test should see the pristine
+                  // fixture).
+                  return [{ ...existing, ...patch }];
+                },
+              }),
+            };
+          },
+        }),
       };
     }),
   },
@@ -354,6 +458,264 @@ describe("GET /crm/nonprofits", () => {
   it("rejects `?offset=-1` with 400 (must be >= 0)", async () => {
     const res = await crm.request("/nonprofits?offset=-1", {
       headers: { Cookie: authCookie() },
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+// ---------- POST /crm/nonprofits ---------------------------------------------------
+//
+// Auth + validation + success envelopes. The crm mount already runs
+// `crm.use("*", requireSession)`, so every test in this section uses the
+// `authCookie()` helper from the suite above.
+
+type InsertedNonprofit = {
+  id: number;
+  name: string;
+  contactEmail: string | null;
+  grantCycleDates: string | null;
+  grantAmount: number | null;
+  grantStatus: string | null;
+};
+
+describe("POST /crm/nonprofits", () => {
+  const path = "/nonprofits";
+
+  it("returns 401 when no session cookie is present", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Acme Foundation" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 when the session is expired", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: authCookie({ expired: true }),
+      },
+      body: JSON.stringify({ name: "Acme Foundation" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when `name` is missing", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: authCookie(),
+      },
+      body: JSON.stringify({ contactEmail: "info@example.org" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when `contactEmail` is not a valid email", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: authCookie(),
+      },
+      body: JSON.stringify({
+        name: "Acme",
+        contactEmail: "not-an-email",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when `grantAmount` is negative", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: authCookie(),
+      },
+      body: JSON.stringify({
+        name: "Acme",
+        grantAmount: -100,
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 201 with the inserted row when only required fields are provided", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: authCookie(),
+      },
+      body: JSON.stringify({ name: "Acme Foundation" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as InsertedNonprofit;
+    expect(body.name).toBe("Acme Foundation");
+    // Optional fields default to null when not provided so the wire
+    // shape matches what CrmCard already renders for unseeded rows.
+    expect(body.contactEmail).toBeNull();
+    expect(body.grantCycleDates).toBeNull();
+    expect(body.grantAmount).toBeNull();
+    expect(body.grantStatus).toBeNull();
+    expect(typeof body.id).toBe("number");
+  });
+
+  it("returns 201 with all populated fields when every optional field is supplied", async () => {
+    const res = await crm.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: authCookie(),
+      },
+      body: JSON.stringify({
+        name: "Filled Foundation",
+        contactEmail: "grants@example.org",
+        grantCycleDates: "2026-01 → 2026-12",
+        grantAmount: 50000,
+        grantStatus: "Active",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as InsertedNonprofit;
+    expect(body.name).toBe("Filled Foundation");
+    expect(body.contactEmail).toBe("grants@example.org");
+    expect(body.grantCycleDates).toBe("2026-01 → 2026-12");
+    expect(body.grantAmount).toBe(50000);
+    expect(body.grantStatus).toBe("Active");
+  });
+});
+
+// ---------- PATCH /crm/nonprofits/:id ----------------------------------------------
+//
+// Partial-update semantics are the core contract: only fields provided
+// in the body are written. Empty bodies, invalid ids, and missing rows
+// all surface as expected status codes.
+
+describe("PATCH /crm/nonprofits/:id", () => {
+  // Each test calls `authCookie()` inline rather than capturing a
+  // describe-scope cookie: `beforeEach` clears the session store, so
+  // any cookie captured before the first test would 401 by the time
+  // the request fires.
+
+  it("returns 401 when no session cookie is present", async () => {
+    const res = await crm.request("/nonprofits/1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when :id is not a positive integer", async () => {
+    const res = await crm.request("/nonprofits/abc", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when :id is 0 or negative", async () => {
+    const zero = await crm.request("/nonprofits/0", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(zero.status).toBe(400);
+    const neg = await crm.request("/nonprofits/-5", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(neg.status).toBe(400);
+  });
+
+  it("returns 400 when the body is empty (no fields to patch)", async () => {
+    const res = await crm.request("/nonprofits/1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 when the nonprofit does not exist", async () => {
+    nonprofitsAll.mockImplementation(() => []);
+    const res = await crm.request("/nonprofits/9999", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 200 and applies a single-field patch (other fields untouched)", async () => {
+    const existing = makeNonprofit({
+      id: 7,
+      name: "Old Name",
+      contactEmail: "old@example.org",
+      grantCycleDates: "2025",
+      grantAmount: 10_000,
+      grantStatus: "Active",
+    });
+    nonprofitsAll.mockImplementation(() => [existing]);
+
+    const res = await crm.request("/nonprofits/7", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({ name: "New Name" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as InsertedNonprofit;
+    expect(body.name).toBe("New Name");
+    // Any field the client did NOT include must come back exactly as
+    // it was on the existing row \u2014 partial-update semantics.
+    expect(body.contactEmail).toBe("old@example.org");
+    expect(body.grantCycleDates).toBe("2025");
+    expect(body.grantAmount).toBe(10_000);
+    expect(body.grantStatus).toBe("Active");
+  });
+
+  it("returns 200 and applies a multi-field patch", async () => {
+    nonprofitsAll.mockImplementation(() => [
+      makeNonprofit({
+        id: 8,
+        name: "Before",
+        contactEmail: "before@example.org",
+        grantAmount: 1000,
+      }),
+    ]);
+    const res = await crm.request("/nonprofits/8", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({
+        name: "After",
+        grantAmount: 2500,
+        grantStatus: "Pending",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as InsertedNonprofit;
+    expect(body.name).toBe("After");
+    expect(body.grantAmount).toBe(2500);
+    expect(body.grantStatus).toBe("Pending");
+    // Untouched field keeps its original value.
+    expect(body.contactEmail).toBe("before@example.org");
+  });
+
+  it("returns 400 when the patch contains an invalid email", async () => {
+    nonprofitsAll.mockImplementation(() => [
+      makeNonprofit({ id: 9, name: "V" }),
+    ]);
+    const res = await crm.request("/nonprofits/9", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: authCookie() },
+      body: JSON.stringify({ contactEmail: "not-an-email" }),
     });
     expect(res.status).toBe(400);
   });

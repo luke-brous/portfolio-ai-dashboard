@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { getCookie, setCookie } from "hono/cookie";
 import { getOAuthClient } from "../lib/google-client";
 import { createSession, getSession, deleteSession } from "../lib/session";
+import { sessionCookieOptions } from "../lib/cookieOptions";
 import * as z from "zod";
 import { zValidator } from "@hono/zod-validator";
 
@@ -61,10 +62,7 @@ auth.get("/callback", zValidator("query", callbackSchema), async (c) => {
 
     // Set a session cookie
     setCookie(c, "sessionId", sessionId, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-      path: "/",
+      ...sessionCookieOptions(),
       maxAge: 60 * 60 * 24 * 7, // 1 week
     });
 
@@ -103,11 +101,8 @@ auth.get("/logout", (c) => {
 
   // Clear session cookie
   setCookie(c, "sessionId", "", {
-    httpOnly: true,
-    secure: true,
-    sameSite: "lax",
+    ...sessionCookieOptions(),
     maxAge: 0, // Expire the cookie immediately
-    path: "/",
   });
   const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
   return c.redirect(`${frontendUrl}/`);

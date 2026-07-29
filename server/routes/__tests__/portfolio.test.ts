@@ -1,4 +1,8 @@
 import { describe, it, expect, mock, beforeEach, afterAll } from "bun:test";
+import { getCookie } from "hono/cookie";
+import type { Context, Next } from "hono";
+import crypto from "crypto";
+import * as drizzleOrm from "drizzle-orm";
 import portfolio from "../portfolio";
 import { investments, priceSnapshots, newsItems } from "../../db/schema";
 import {
@@ -6,6 +10,8 @@ import {
   recordSyncRun,
   recordSyncStart,
 } from "../../lib/syncState";
+import { createSession } from "../../lib/session";
+import type { SessionData } from "../../types/session";
 
 // ---------- Module mocks ------------------------------------------------------------
 //
@@ -14,31 +20,160 @@ import {
 // module here (resolved from this test file as `../../db/client`), so the
 // production route never touches a real SQLite connection.
 
+// ---------- drizzle-orm mock --------------------------------------------------------
+//
+// Production calls `eq(investments.id, X)`, `eq(priceSnapshots.investmentId, X)`,
+// etc. inside `.where(...)`. Inspecting drizzle's internal SQL AST via
+// `queryChunks` couples the test to internal shape (the value lives at index
+// 2 wrapped in a `Param`), so we mock `eq` itself with a predictable token
+// shape. Every other drizzle export (asc/desc/and/gte/sql/etc.) stays
+// untouched so the existing tests keep working.
+mock.module("drizzle-orm", () => ({
+  ...drizzleOrm,
+  eq: (col: unknown, val: unknown) => ({ __isMockedEq: true as const, col, val }),
+}));
+
+// Type alias for the mocked eq() token. Using a private brand keeps the
+// narrowing isolated to these test files.
+type MockedEqToken = { __isMockedEq: true; col: unknown; val: unknown };
+
+function asMockedEq(condition: unknown): MockedEqToken | null {
+  if (
+    condition &&
+    typeof condition === "object" &&
+    (condition as { __isMockedEq?: unknown }).__isMockedEq === true
+  ) {
+    return condition as MockedEqToken;
+  }
+  return null;
+}
+
+// ---------- Session mock ------------------------------------------------------------
+// The new POST/DELETE routes use `requireSession` from
+// `../../lib/session`. Mirror the same mock harness as crm.test.ts so the
+// 401 ladder behaves identically and we don't have a parallel
+// implementation that can drift.
+
+const sessionStore = new Map<string, SessionData>();
+
+mock.module("../../lib/session", () => ({
+  createSession: (id: string, data: SessionData) => {
+    sessionStore.set(id, data);
+  },
+  getSession: (id: string) => sessionStore.get(id),
+  deleteSession: (id: string) => {
+    sessionStore.delete(id);
+  },
+  // Strip the gmailClient `c.set(...)` call that production `requireSession`
+  // performs — /portfolio never reads it, and mocking googleapis here
+  // would be more harness than we need. The 401 ladder is otherwise
+  // identical to production (see server/lib/session.ts).
+  requireSession: async (c: Context, next: Next) => {
+    const sid = getCookie(c, "sessionId") ?? getCookie(c, "session_id");
+    if (!sid) return c.json({ error: "Not authenticated" }, 401);
+    const session = sessionStore.get(sid);
+    if (!session) return c.json({ error: "Not authenticated" }, 401);
+    if (Date.now() > session.expiresAt) {
+      sessionStore.delete(sid);
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+    await next();
+  },
+}));
+
+// ---------- DB mock ----------------------------------------------------------------
+
 const investmentsAll = mock(() => [] as Array<typeof investments.$inferSelect>);
 const snapshotsAll = mock(
   () => [] as Array<typeof priceSnapshots.$inferSelect>,
 );
 const newsAll = mock(() => [] as Array<typeof newsItems.$inferSelect>);
 
+// Discriminated insert/delete mocks so individual tests can verify that
+// the production handler executed the expected operation in the expected
+// order with the expected values.
+const insertReturn = mock(
+  (
+    table: unknown,
+    values: Record<string, unknown>,
+  ): Array<Record<string, unknown>> => {
+    if (table !== investments) {
+      throw new Error(`Unexpected insert target in test: ${String(table)}`);
+    }
+    // Production autoincrements via the schema's `id` PK; the mock just
+    // emits a fresh id each call so tests can assert on it if needed.
+    const id = 900 + insertReturn.mock.calls.length;
+    return [{ id, ...values }];
+  },
+);
+
+const deleteOps: Array<{ table: unknown; condition: unknown }> = [];
+const deleteRun = mock((table: unknown, condition: unknown) => {
+  deleteOps.push({ table, condition });
+});
+
+const deleteInvestmentReturn = mock(
+  (table: unknown, condition: unknown): Array<unknown> => {
+    if (table !== investments) {
+      throw new Error(`Unexpected delete target in test: ${String(table)}`);
+    }
+    const eq = asMockedEq(condition);
+    if (!eq || eq.col !== investments.id || typeof eq.val !== "number") {
+      throw new Error(
+        `Unexpected delete condition on investments in test: ${String(condition)}`,
+      );
+    }
+    return investmentsAll().filter((r) => r.id === eq.val);
+  },
+);
+
 function makeChain(table: unknown) {
   if (table === investments) {
-    // Mirror the production `orderBy(asc(investments.ticker))` behaviour:
-    // sort the mocked rows by ticker descending—er, ascending. Whatever
-    // direction the test opts into, sort accordingly.
     return {
       orderBy: () => {
-        const rows = investmentsAll();
-        // Drizzle's `asc` returns a column descriptor; the real query
-        // is sorted ASC by the underlying column. Tests only assert
-        // on the AAPL→GOOG→MSFT direction (ASC), so sort ascending.
         return {
-          all: () => [...rows].sort((a, b) => a.ticker.localeCompare(b.ticker)),
+          all: () =>
+            [...investmentsAll()].sort((a, b) =>
+              a.ticker.localeCompare(b.ticker),
+            ),
+        };
+      },
+      // POST dedup pre-check uses `eq(ticker, X)`; DELETE lookup uses
+      // `eq(id, X)`. Dispatch on the mocked eq token shape rather than
+      // Drizzle's internal SQL AST.
+      where: (condition: unknown) => {
+        return {
+          get: () => {
+            const eq = asMockedEq(condition);
+            if (!eq) return null;
+            const rows = investmentsAll();
+            // Split the && narrowing into nested ifs so TS carries the
+            // `eq.val` narrow into the body without needing a cast.
+            if (eq.col === investments.ticker) {
+              if (typeof eq.val === "string") {
+                const target = eq.val;
+                return (
+                  rows.find(
+                    (r) => r.ticker.toUpperCase() === target.toUpperCase(),
+                  ) ?? null
+                );
+              }
+              return null;
+            }
+            if (eq.col === investments.id && typeof eq.val === "number") {
+              return rows.find((r) => r.id === eq.val) ?? null;
+            }
+            return null;
+          },
         };
       },
     };
   }
   if (table === priceSnapshots) {
     return {
+      // The /news GET path passes `gte(...)` and `eq(investments.ticker, …)`
+      // through this where. Existing tests don't inspect the arg; the new
+      // POST/DELETE routes never read `priceSnapshots` via `select`.
       where: () => ({
         orderBy: () => ({
           limit: () => ({ all: snapshotsAll }),
@@ -47,11 +182,8 @@ function makeChain(table: unknown) {
     };
   }
   if (table === newsItems) {
-    // /portfolio/news: db.select().from(newsItems)
-    //   .leftJoin(investments, ...).where(...).orderBy(...).limit(...).all().
     const limitNode = { all: newsAll };
     return {
-      // Reserved for any future direct-all read.
       all: newsAll,
       leftJoin: () => ({
         where: () => ({ orderBy: () => ({ limit: () => limitNode }) }),
@@ -67,9 +199,33 @@ const dbMockFactory = () => ({
       from: mock((table: unknown) => makeChain(table)),
     })),
     all: mock(async (queryPromise: Promise<unknown>) => {
-      // Resolve the promise to get the SQL string, then return snapshots
       await queryPromise;
       return snapshotsAll();
+    }),
+    insert: mock((table: unknown) => ({
+      values: (record: Record<string, unknown>) => ({
+        returning: () => ({
+          all: () => insertReturn(table, record),
+        }),
+      }),
+    })),
+    delete: mock((table: unknown) => {
+      return {
+        where: (condition: unknown) => {
+          // Record the cascade at `where` time so we observe BOTH the
+          // `.run()` path (priceSnapshots, newsItems) AND the
+          // `.returning().all()` path (investments itself). If we
+          // tracked only inside `.run()`, the final investments
+          // delete would silently fall out of `deleteOps`.
+          deleteOps.push({ table, condition });
+          return {
+            run: () => undefined,
+            returning: () => ({
+              all: () => deleteInvestmentReturn(table, condition),
+            }),
+          };
+        },
+      };
     }),
   },
 });
@@ -85,6 +241,15 @@ beforeEach(() => {
   snapshotsAll.mockImplementation(() => []);
   newsAll.mockReset();
   newsAll.mockImplementation(() => []);
+  // Use `mockClear` (not `mockReset`) on these mocks so the freshly
+  // installed implementations survive across tests. Reset would strip
+  // the implementation \u2014 our inserts and deletes start returning
+  // `undefined`, which silently breaks assertions downstream.
+  insertReturn.mockClear();
+  deleteRun.mockClear();
+  deleteInvestmentReturn.mockClear();
+  deleteOps.length = 0;
+  sessionStore.clear();
 });
 
 afterAll(() => {
@@ -152,6 +317,18 @@ function makeSnapshot(overrides: Partial<SnapshotRow>): SnapshotRow {
     timestamp: new Date("2026-07-01T00:00:00Z"),
     ...overrides,
   };
+}
+
+// Returns a sessionId cookie value for an authenticated request to the
+// new POST/DELETE routes. Mirrors the helper shape used in crm.test.ts so
+// the two suites share the same auth-cookie conventions.
+function makeSessionCookie(): string {
+  const id = `portfolio-test-${crypto.randomUUID()}`;
+  createSession(id, {
+    tokens: { access_token: "fake" },
+    expiresAt: Date.now() + 60 * 60 * 1000, // 1h validity
+  });
+  return `sessionId=${id}`;
 }
 
 // ---------- Suite ------------------------------------------------------------------
@@ -577,5 +754,244 @@ describe("GET /portfolio/news", () => {
     expect(res.status).toBe(500);
     const body = (await res.json()) as { message: string };
     expect(body).toEqual({ message: "Error fetching news" });
+  });
+});
+
+// ---------- POST /portfolio/investments -------------------------------------------
+//
+// Auth, validation, dedup, and success envelopes. Inserted-row shape is
+// compared against the production handler's `.returning()` contract:
+// `[0]` is the row object as Drizzle would emit it (camelCase preserved).
+
+type InsertedInvestment = {
+  id: number;
+  ticker: string;
+  companyName: string;
+  sector: string;
+  shares: number;
+};
+
+describe("POST /portfolio/investments", () => {
+  const path = "/investments";
+
+  it("returns 401 when no session cookie is present", async () => {
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        sector: "Technology",
+        shares: 10,
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 when the cookie value does not match any active session", async () => {
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: "sessionId=does-not-exist",
+      },
+      body: JSON.stringify({
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        sector: "Technology",
+        shares: 10,
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when shares is missing", async () => {
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: makeSessionCookie(),
+      },
+      body: JSON.stringify({
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        sector: "Technology",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when shares is negative", async () => {
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: makeSessionCookie(),
+      },
+      body: JSON.stringify({
+        ticker: "AAPL",
+        companyName: "Apple Inc.",
+        sector: "Technology",
+        shares: -1,
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when ticker exceeds 10 characters", async () => {
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: makeSessionCookie(),
+      },
+      body: JSON.stringify({
+        ticker: "TOOLONGTICKER",
+        companyName: "Long Co.",
+        sector: "Tech",
+        shares: 10,
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 201 and the inserted row on a valid request, with ticker uppercased", async () => {
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: makeSessionCookie(),
+      },
+      // Lowercase `aapl` here proves the Zod `.transform(toUpperCase)`
+      // and the case-insensitive dedup path work together.
+      body: JSON.stringify({
+        ticker: "aapl",
+        companyName: "Apple Inc.",
+        sector: "Technology",
+        shares: 25,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as InsertedInvestment;
+    expect(body.ticker).toBe("AAPL");
+    expect(body.companyName).toBe("Apple Inc.");
+    expect(body.sector).toBe("Technology");
+    expect(body.shares).toBe(25);
+    expect(typeof body.id).toBe("number");
+  });
+
+  it("returns 409 when a row with the same ticker already exists (case-insensitive)", async () => {
+    investmentsAll.mockImplementation(() => [
+      makeInvestment({ id: 1, ticker: "AAPL", companyName: "Apple Inc." }),
+    ]);
+    const res = await portfolio.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: makeSessionCookie(),
+      },
+      body: JSON.stringify({
+        ticker: "aapl", // duplicate of an existing AAPL row
+        companyName: "Apple Duplicate",
+        sector: "Tech",
+        shares: 5,
+      }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toMatch(/AAPL/i);
+  });
+});
+
+// ---------- DELETE /portfolio/investments/:id -------------------------------------
+
+describe("DELETE /portfolio/investments/:id", () => {
+  it("returns 401 when no session cookie is present", async () => {
+    const res = await portfolio.request("/investments/1", { method: "DELETE" });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when :id is not a positive integer", async () => {
+    const res = await portfolio.request("/investments/abc", {
+      method: "DELETE",
+      headers: { Cookie: makeSessionCookie() },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when :id is zero or negative", async () => {
+    const zero = await portfolio.request("/investments/0", {
+      method: "DELETE",
+      headers: { Cookie: makeSessionCookie() },
+    });
+    expect(zero.status).toBe(400);
+    const neg = await portfolio.request("/investments/-3", {
+      method: "DELETE",
+      headers: { Cookie: makeSessionCookie() },
+    });
+    expect(neg.status).toBe(400);
+  });
+
+  it("returns 404 when the investment does not exist", async () => {
+    investmentsAll.mockImplementation(() => []);
+    const res = await portfolio.request("/investments/9999", {
+      method: "DELETE",
+      headers: { Cookie: makeSessionCookie() },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 204 and cascades dependents on success", async () => {
+    const target = makeInvestment({ id: 42, ticker: "MSFT" });
+    investmentsAll.mockImplementation(() => [target]);
+
+    const res = await portfolio.request("/investments/42", {
+      method: "DELETE",
+      headers: { Cookie: makeSessionCookie() },
+    });
+    expect(res.status).toBe(204);
+    // 204 No Content — verify the body is empty.
+    expect(await res.text()).toBe("");
+
+    // Cascade order is intentional: price_snapshots → news_items →
+    // investments. We assert the operations happened (and on the right
+    // foreign-key column) but not the exact order, because Drizzle's
+    // mock fn call list is sufficient evidence for the production
+    // semantics.
+    const tableSequence = deleteOps.map((op) =>
+      op.table === priceSnapshots
+        ? "price_snapshots"
+        : op.table === newsItems
+          ? "news_items"
+          : op.table === investments
+            ? "investments"
+            : "unknown",
+    );
+    expect(tableSequence).toContain("price_snapshots");
+    expect(tableSequence).toContain("news_items");
+    expect(tableSequence).toContain("investments");
+    // Filter column must be the *FK column*, not the row id, on the
+    // dependent tables.
+    const dependentByInvestmentId = (table: unknown, fkColumn: unknown) =>
+      deleteOps.some((op) => {
+        if (op.table !== table) return false;
+        const eq = asMockedEq(op.condition);
+        if (!eq) return false;
+        return eq.col === fkColumn && eq.val === 42;
+      });
+    expect(
+      dependentByInvestmentId(priceSnapshots, priceSnapshots.investmentId),
+    ).toBe(true);
+    expect(dependentByInvestmentId(newsItems, newsItems.investmentId)).toBe(
+      true,
+    );
+    // The final investments delete must target `investments.id`, not
+    // any other column.
+    const investmentDelete = deleteOps.find((op) => op.table === investments);
+    const investmentEq = investmentDelete
+      ? asMockedEq(investmentDelete.condition)
+      : null;
+    expect(investmentEq?.col).toBe(investments.id);
+    expect(investmentEq?.val).toBe(42);
   });
 });
