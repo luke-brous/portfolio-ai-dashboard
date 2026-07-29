@@ -27,10 +27,19 @@ function formatAsOf(iso: string | null): string {
   return `${datePart}, ${timePart}`;
 }
 
+/**
+ * Investment row. When `onDelete` is provided, a trash button appears on
+ * the right; otherwise the row renders exactly as before so any other
+ * call site (e.g. a future read-only summary) keeps its current shape.
+ */
 export default function InvestmentRow({
   investment,
+  onDelete,
+  isDeleting = false,
 }: {
   investment: Investment;
+  onDelete?: () => void;
+  isDeleting?: boolean;
 }) {
   const latest = investment.latestSnapshot?.price ?? null;
   const dollarDelta = investment.delta?.price ?? null;
@@ -63,6 +72,40 @@ export default function InvestmentRow({
       <div className="hidden sm:block text-xs text-slate-400 font-light tabular-nums w-40 text-right">
         {formatAsOf(asOf)}
       </div>
+
+      {/* Delete control — opt-in via onDelete. {@link Advisor} passes
+       * the useDeleteInvestment mutation; here we just render the
+       * affordance. */}
+      {onDelete && (
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={isDeleting}
+          aria-label={`Delete ${investment.ticker}`}
+          title={`Delete ${investment.ticker}`}
+          className="shrink-0 rounded-md p-2 text-slate-400 transition-colors duration-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {/* Minimal inline trash glyph — avoids pulling in an icon
+           * library per the spec's "no new component library" rule. */}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="h-4 w-4"
+            aria-hidden="true"
+          >
+            <path d="M3 6h18" />
+            <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+            <path d="M10 11v6" />
+            <path d="M14 11v6" />
+          </svg>
+        </button>
+      )}
     </div>
   );
 }
