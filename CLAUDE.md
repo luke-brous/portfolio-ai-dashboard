@@ -241,3 +241,13 @@ client/
 - **Access token expiry:** ~1 hour, but Google OAuth library auto-refreshes via refresh_token (offline mode already enabled)
 - **OAuth consent screen test mode:** Only Gmail accounts added as test users in Google Cloud Console can log in until screen is verified
 - **Finnhub rate limit:** 60 requests/minute on free tier; current 2s throttle is comfortable for 2 calls per ticker
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

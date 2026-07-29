@@ -134,6 +134,12 @@ server/db/data/*.csv
 server/db/seed.ts
 
 # Ignore personal md files
-*.md 
-!CLAUDE.md 
-!README.md 
+*.md
+!CLAUDE.md
+!README.md
+
+# graphify
+graphify-out/ 
+
+# claude directory
+.claude/
