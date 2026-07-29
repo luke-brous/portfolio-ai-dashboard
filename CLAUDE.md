@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Workflow — Read First
+
+**Never open a pull request unless explicitly told to.** The repo owner does all committing, pushing, and PR creation. Do not run `git commit`, `git push`, or `gh pr create` on your own initiative — not even at the end of a task that "feels done", and not because a branch looks ready.
+
+Leave finished work as **uncommitted changes in the working checkout** and say what you changed. That is the deliverable.
+
+Corollary: work in the checkout the dev server is actually running. A fix committed to a side branch or an isolated worktree does not reach `bun run dev`, so it will look like the fix silently did nothing.
+
 ## Project Overview
 
 **Mail Brief** is a full-stack personal dashboard combining three major features:
@@ -84,7 +92,8 @@ Four core tables drive the app:
 **Pipeline 3: CRM (Nonprofits + Correspondence)**
 
 - Similar to Mail Brief but scoped per nonprofit
-- Routes: `GET /crm/nonprofits`, `POST /crm/reports`, etc. (see server/routes/crm.ts)
+- Routes: `GET|POST /crm/nonprofits`, `PATCH|DELETE /crm/nonprofits/:id` (see server/routes/crm.ts). `/crm/reports` is not implemented.
+- `DELETE` cascades explicitly: `reports.nonprofitId` is a NOT NULL FK, so dependent reports are deleted first (SQLite runs with `PRAGMA foreign_keys` off by default, so nothing enforces this for us)
 - Frontend: Pages under `/crm` route (in progress)
 
 ## File Organization
@@ -113,7 +122,7 @@ server/
 │   ├── gmail.ts               # /labels, /messages (Gmail API wrappers)
 │   ├── summarize.ts           # /summarize (per-email Gemini calls)
 │   ├── portfolio.ts           # /investments, /news, /sync-status (read API)
-│   ├── crm.ts                 # /nonprofits (read-only; /reports NOT implemented)
+│   ├── crm.ts                 # /nonprofits CRUD (list/create/update/delete; /reports NOT implemented)
 │   └── __tests__/
 └── __tests__/
     ├── errorHandler.test.ts   # Global error handler sanitization
@@ -184,8 +193,9 @@ client/
 ### 7. Frontend Vite Proxy vs. Direct VITE_BACKEND_URL
 
 - `client/vite.config.ts` proxies `/auth`, `/gmail`, `/summarize`, `/export`, `/portfolio`, and `/crm` to the backend
-- `/portfolio` and `/crm` **are** proxied — all client hooks can and do use relative paths via `client/src/lib/api.ts`. There is no need for `VITE_BACKEND_URL` in dev.
-- Because the Vite proxy makes the frontend and API same-origin in dev, the session cookie's `sameSite: "lax"` setting is never exercised cross-site locally. A deploy that splits the client and API across different registrable domains will silently drop the cookie on every XHR — see `demo-readiness.md`.
+- `/portfolio` and `/crm` **are** proxied — all client hooks use relative paths via `client/src/lib/api.ts`.
+- **Invariant: never call `fetch` directly and never interpolate `VITE_BACKEND_URL` in a hook.** Go through `apiGet` / `apiPost` / `apiMutate`, which resolve the path against the backend origin in one place (`apiUrl`). The `sessionId` cookie is set by `/auth/callback` on the _backend_ origin and is host-only, so a call that leaks onto the frontend origin (a bare relative path when `VITE_BACKEND_URL` points elsewhere, as in Codespaces where :5173 and :3000 are separate hosts) arrives cookieless and 401s. This is exactly what broke the Advisor/CRM create forms: reads used the absolute backend URL, writes used relative paths, and only the writes carry `requireSession`.
+- If the client and API are genuinely cross-site, `SameSite=Lax` also drops the cookie on cross-site XHR. Set `SESSION_COOKIE_SAMESITE=none` (see `server/lib/cookieOptions.ts`) for that deployment shape.
 - See README for env var guidance
 
 ## Testing Strategy
@@ -247,6 +257,7 @@ client/
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
 Rules:
+
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
