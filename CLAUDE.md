@@ -79,7 +79,7 @@ Four core tables drive the app:
 1. User OAuth login → session created in `server/lib/session.ts` (in-memory Map)
 2. `GET /gmail/labels` → returns Gmail labels
 3. User picks label + date range → `GET /gmail/messages` decodes raw emails
-4. `POST /summarize` → calls Gemini once per email, returns structured summaries
+4. `POST /summarize` → calls Gemini once per email, returns structured summaries. Authed (`summarize.use("*", requireSession)`) and bounded: max 50 emails/request, 50k chars per `body`/`snippet`, 2k per header field. The 8s inter-call throttle is skipped after the final email. These caps exist because the route spends the server's Gemini quota and holds the connection open for its whole duration — don't raise them without thinking about both.
 5. CSV export — **not implemented**. There is no `/export` route registered in `server/index.ts` and no `server/routes/export.ts` file. `client/vite.config.ts` still proxies `/export`, so the path is reserved but unbuilt.
 
 **Pipeline 2: Advisor Intelligence (Finnhub Daily Sync → Local Read API)**
@@ -88,6 +88,7 @@ Four core tables drive the app:
 - `GET /portfolio/investments` — joins with latest + previous snapshot for day-over-day delta
 - `GET /portfolio/news?ticker=&days=N` — recent news for a ticker or full portfolio
 - `GET /portfolio/sync-status` — returns last Finnhub run timestamp
+- **Auth:** the whole mount is behind `portfolio.use("*", requireSession)` — reads included, since `GET /investments` returns share counts. Do not add an unauthenticated route here. The legacy twin `GET /sync/last-run` in `server/index.ts` is authed for the same reason.
 
 **Pipeline 3: CRM (Nonprofits + Correspondence)**
 
@@ -194,7 +195,7 @@ client/
 
 - `client/vite.config.ts` proxies `/auth`, `/gmail`, `/summarize`, `/export`, `/portfolio`, and `/crm` to the backend
 - `/portfolio` and `/crm` **are** proxied — all client hooks use relative paths via `client/src/lib/api.ts`.
-- **Invariant: never call `fetch` directly and never interpolate `VITE_BACKEND_URL` in a hook.** Go through `apiGet` / `apiPost` / `apiMutate`, which resolve the path against the backend origin in one place (`apiUrl`). The `sessionId` cookie is set by `/auth/callback` on the _backend_ origin and is host-only, so a call that leaks onto the frontend origin (a bare relative path when `VITE_BACKEND_URL` points elsewhere, as in Codespaces where :5173 and :3000 are separate hosts) arrives cookieless and 401s. This is exactly what broke the Advisor/CRM create forms: reads used the absolute backend URL, writes used relative paths, and only the writes carry `requireSession`.
+- **Invariant: never call `fetch` directly and never interpolate `VITE_BACKEND_URL` in a hook.** Go through `apiGet` / `apiPost` / `apiMutate`, which resolve the path against the backend origin in one place (`apiUrl`). The `sessionId` cookie is set by `/auth/callback` on the _backend_ origin and is host-only, so a call that leaks onto the frontend origin (a bare relative path when `VITE_BACKEND_URL` points elsewhere, as in Codespaces where :5173 and :3000 are separate hosts) arrives cookieless and 401s. This is exactly what broke the Advisor/CRM create forms: reads used the absolute backend URL, writes used relative paths, and at the time only the writes carried `requireSession` (all of `/portfolio/*` is authed now, so that asymmetry no longer masks the bug — a leaked path 401s immediately). Every hook now routes through `apiGet` / `apiMutate`; `Landing.tsx` and `Navbar.tsx` use `apiUrl` for their `window.location.replace` targets.
 - If the client and API are genuinely cross-site, `SameSite=Lax` also drops the cookie on cross-site XHR. Set `SESSION_COOKIE_SAMESITE=none` (see `server/lib/cookieOptions.ts`) for that deployment shape.
 - See README for env var guidance
 
