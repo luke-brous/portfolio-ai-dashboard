@@ -1,16 +1,5 @@
-import {
-  expect,
-  test,
-  describe,
-  mock,
-  beforeAll,
-  beforeEach,
-  afterEach,
-  afterAll,
-} from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { expect, test, describe, mock } from "bun:test";
+import { existsSync } from "node:fs";
 
 // Mock the Gemini API call and sleep
 mock.module("../../lib/gemini", () => ({
@@ -37,42 +26,23 @@ mock.module("../../lib/utils", () => ({
 // inert until a call is made, and this route never touches Gmail, so no
 // stubbing is needed there.
 //
-// SESSION_FILE is (re)set per test and restored afterwards rather than
-// pinned once for the suite: sessionStore.ts reads the env on every call,
-// and server/lib/__tests__/sessionStore.test.ts pins its own value, so
-// leaving ours in place would leak across files.
+// Storage is isolated per TEST via server/test-utils/sessionFile.ts: each
+// test gets its own temp directory, so no other suite in the run can see
+// or clobber the sessions written here (and this suite can't leave rows
+// behind for the next one).
+//
+// This suite must also run in a process where nobody has called
+// `mock.module("../../lib/session", ...)` — crm/portfolio/gmail/
+// errorHandler all do, it is permanent and process-global in Bun, and it
+// would silently swap the production `requireSession` this suite exists
+// to exercise for a stub. `bun run test:real-session` is that process;
+// the guard test below fails loudly if the split ever breaks.
 import { createSession } from "../../lib/session";
+import { useIsolatedSessionFile } from "../../test-utils/sessionFile";
 
 const { default: app } = await import("../../index");
 
-let sessionFile: string;
-let sessionDir: string;
-let previousSessionFile: string | undefined;
-
-beforeAll(() => {
-  sessionDir = mkdtempSync(join(tmpdir(), "summarize-session-"));
-  sessionFile = join(sessionDir, "sessions.json");
-});
-
-afterAll(() => {
-  rmSync(sessionDir, { recursive: true, force: true });
-});
-
-beforeEach(() => {
-  previousSessionFile = process.env.SESSION_FILE;
-  process.env.SESSION_FILE = sessionFile;
-  // Drop rows left by the previous test so a stale id can't satisfy a
-  // lookup in this one.
-  rmSync(sessionFile, { force: true });
-});
-
-afterEach(() => {
-  if (previousSessionFile === undefined) {
-    delete process.env.SESSION_FILE;
-  } else {
-    process.env.SESSION_FILE = previousSessionFile;
-  }
-});
+const sessionFile = useIsolatedSessionFile();
 
 function makeSessionCookie(expiresAt = Date.now() + 60 * 60 * 1000): string {
   const id = `summarize-test-${crypto.randomUUID()}`;
@@ -101,6 +71,18 @@ async function postSummarize(
 }
 
 describe("Gemini summarize route", () => {
+  // Guard for the claim this whole harness rests on. `mock.module` is
+  // process-global in Bun: crm.test.ts and portfolio.test.ts both replace
+  // "../../lib/session" with a Map-backed stub, and whichever file loads
+  // first wins for the rest of the run. If that stub ever reached this
+  // suite, `createSession` would write to a Map and the assertions below
+  // would be exercising the stub's 401 ladder rather than production's.
+  // A row on disk proves we are on the real file-backed store.
+  test("the session harness is the real file-backed store, not a mock", () => {
+    makeSessionCookie();
+    expect(existsSync(sessionFile.path)).toBe(true);
+  });
+
   // The 401 ladder below is the production one in server/lib/session.ts —
   // nothing here stubs it. All three branches answer the same
   // "Not authenticated" body so a probe can't distinguish an expired
