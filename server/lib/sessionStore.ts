@@ -11,9 +11,10 @@
 // ---------------------
 // Move the source of truth to a small JSON file on disk. Reads are
 // per-call (synchronous fs — fine for the personal-use scale here:
-// a 1-2KB JSON file in `cwd`). Writes are atomic-enough for our
-// purposes (writeFileSync), with the directory created on first
-// write.
+// a 1-2KB JSON file in `cwd`). Writes are atomic: serialise to a
+// temp file in the same directory, then rename(2) over the target,
+// with the directory created on first write. See `writeAll` for why
+// the in-place form was not safe.
 //
 // HMR resilience
 // --------------
@@ -33,8 +34,16 @@
 //      (e.g. rotate to a new disk) without forcing a restart of
 //      every consumer of this module.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { SessionData } from "../types/session";
 
 function sessionFilePath(): string {
@@ -60,14 +69,36 @@ function readAll(): Record<string, SessionData> {
 
 function writeAll(map: Record<string, SessionData>): void {
   const file = sessionFilePath();
+  const dir = dirname(file);
+  // Unique temp name: two processes (or a `--watch` reload racing the
+  // old process) must never share a scratch file, or one's partial
+  // write becomes the other's rename source.
+  const tmp = join(dir, `.sessions.${process.pid}.${randomUUID()}.tmp`);
   try {
     // Ensure the parent directory exists in case SESSION_FILE points
     // somewhere nested (e.g. .data/sessions.json in a container).
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, JSON.stringify(map, null, 2), {
-      mode: 0o600,
-    });
+    mkdirSync(dir, { recursive: true });
+
+    // Atomic replace: serialise to a temp file in the SAME directory,
+    // then rename over the target. rename(2) is atomic within a
+    // filesystem, so a concurrent `readAll()` sees either the whole
+    // old file or the whole new one — never a half-written prefix.
+    //
+    // Writing in place (the previous behaviour) had a real failure
+    // window: writeFileSync truncates first, so a crash, a full disk,
+    // or a reader landing mid-write yields truncated JSON. `readAll()`
+    // swallows that as `{}`, which silently logs out every active
+    // user. The tmp+rename form makes that unreachable.
+    //
+    // mode is set on the temp file so the session data is never
+    // briefly world-readable between create and chmod.
+    writeFileSync(tmp, JSON.stringify(map, null, 2), { mode: 0o600 });
+    renameSync(tmp, file);
   } catch (err) {
+    // Don't leave scratch files behind on a failed write. `force`
+    // makes this a no-op when writeFileSync itself was what failed.
+    rmSync(tmp, { force: true });
+
     // Failing to persist means we can't guarantee the user will be
     // logged in across requests, so rethrow -- the OAuth callback's
     // try/catch turns this into a 500 rather than silently creating
