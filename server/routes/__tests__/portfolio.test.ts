@@ -323,9 +323,9 @@ function makeSnapshot(overrides: Partial<SnapshotRow>): SnapshotRow {
   };
 }
 
-// Returns a sessionId cookie value for an authenticated request to the
-// new POST/DELETE routes. Mirrors the helper shape used in crm.test.ts so
-// the two suites share the same auth-cookie conventions.
+// Returns a sessionId cookie value for an authenticated request. Mirrors the
+// helper shape used in crm.test.ts so the two suites share the same
+// auth-cookie conventions.
 function makeSessionCookie(): string {
   const id = `portfolio-test-${crypto.randomUUID()}`;
   createSession(id, {
@@ -335,11 +335,52 @@ function makeSessionCookie(): string {
   return `sessionId=${id}`;
 }
 
+// Every route on this mount is behind `portfolio.use("*", requireSession)`,
+// reads included, so the happy-path tests all need a cookie. This wrapper
+// attaches a fresh one; the dedicated 401 tests call `portfolio.request`
+// directly so they can omit or corrupt it.
+async function authedRequest(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("Cookie", makeSessionCookie());
+  // `app.request` is typed `Response | Promise<Response>`; awaiting here
+  // normalises it so callers can always `await`.
+  return await portfolio.request(path, { ...init, headers });
+}
+
 // ---------- Suite ------------------------------------------------------------------
+
+// The reads on this mount used to be open while the writes were authed.
+// GET /investments discloses share counts, so it must not regress to public.
+describe("auth on /portfolio reads", () => {
+  it("returns 401 for GET /investments with no session cookie", async () => {
+    const res = await portfolio.request("/investments");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 for GET /news with no session cookie", async () => {
+    const res = await portfolio.request("/news");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 for GET /sync-status with no session cookie", async () => {
+    const res = await portfolio.request("/sync-status");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 401 for GET /investments when the cookie is unknown", async () => {
+    const res = await portfolio.request("/investments", {
+      headers: { Cookie: "sessionId=does-not-exist" },
+    });
+    expect(res.status).toBe(401);
+  });
+});
 
 describe("GET /portfolio/investments", () => {
   it("returns 200 with an empty array when no investments are held", async () => {
-    const res = await portfolio.request("/investments");
+    const res = await authedRequest("/investments");
     expect(res.status).toBe(200);
     expect(await jsonBody(res)).toEqual({ investments: [] });
   });
@@ -351,7 +392,7 @@ describe("GET /portfolio/investments", () => {
       makeInvestment({ id: 3, ticker: "GOOG", companyName: "Alphabet" }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments.map((r) => r.ticker)).toEqual([
       "AAPL",
       "GOOG",
@@ -363,7 +404,7 @@ describe("GET /portfolio/investments", () => {
     investmentsAll.mockImplementation(() => [makeInvestment()]);
     snapshotsAll.mockImplementation(() => []);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments[0]?.latestSnapshot).toBeNull();
     expect(body.investments[0]?.previousSnapshot).toBeNull();
     expect(body.investments[0]?.delta).toEqual({
@@ -382,7 +423,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments[0]?.latestSnapshot?.price).toBe(110);
     expect(body.investments[0]?.previousSnapshot).toBeNull();
     expect(body.investments[0]?.delta).toEqual({
@@ -408,7 +449,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments[0]?.latestSnapshot?.price).toBe(110);
     expect(body.investments[0]?.previousSnapshot?.price).toBe(105);
     expect(body.investments[0]?.delta.price).toBe(5);
@@ -431,7 +472,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     // (33.33 − 33.32) / 33.32 × 100 ≈ 0.03003 → 0.03
     expect(body.investments[0]?.delta.percentChange).toBe(0.03);
   });
@@ -461,7 +502,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments[0]?.latestSnapshot?.price).toBe(999);
     expect(body.investments[0]?.previousSnapshot?.price).toBe(110);
     // Delta is computed against the kept pair (999 vs 110), not 110 vs 100.
@@ -483,7 +524,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments[0]?.delta).toEqual({
       price: null,
       percentChange: null,
@@ -512,7 +553,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments).toHaveLength(1);
     expect(body.investments[0]?.latestSnapshot?.price).toBe(110);
     expect(body.investments[0]?.previousSnapshot).toBeNull();
@@ -523,7 +564,7 @@ describe("GET /portfolio/investments", () => {
       throw new Error("simulated DB failure");
     });
 
-    const res = await portfolio.request("/investments");
+    const res = await authedRequest("/investments");
     expect(res.status).toBe(500);
     const body = (await res.json()) as { message: string };
     expect(body).toEqual({ message: "Error fetching investments" });
@@ -539,7 +580,7 @@ describe("GET /portfolio/investments", () => {
       }),
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments[0]?.latestSnapshot?.timestamp).toBe(
       "2026-07-02T12:34:56.000Z",
     );
@@ -591,7 +632,7 @@ describe("GET /portfolio/investments", () => {
       }), // Should be ignored
     ]);
 
-    const body = await jsonBody(await portfolio.request("/investments"));
+    const body = await jsonBody(await authedRequest("/investments"));
     expect(body.investments).toHaveLength(2);
 
     const aapl = body.investments.find((i) => i.ticker === "AAPL");
@@ -610,7 +651,7 @@ describe("GET /portfolio/sync-status", () => {
 
   it("reflects an in-flight run (inFlight: true)", async () => {
     recordSyncStart();
-    const res = await portfolio.request("/sync-status");
+    const res = await authedRequest("/sync-status");
     const body = (await res.json()) as { inFlight: boolean };
     expect(body.inFlight).toBe(true);
     recordSyncFinish(); // tidy for the next test
@@ -624,7 +665,7 @@ describe("GET /portfolio/sync-status", () => {
     };
     recordSyncRun(outcome);
     recordSyncFinish();
-    const res = await portfolio.request("/sync-status");
+    const res = await authedRequest("/sync-status");
     const body = (await res.json()) as {
       lastRun: { at: string; ok: boolean; note: string } | null;
       inFlight: boolean;
@@ -645,7 +686,7 @@ describe("GET /portfolio/sync-status", () => {
     };
     recordSyncRun(outcome);
     recordSyncFinish();
-    const res = await portfolio.request("/sync-status");
+    const res = await authedRequest("/sync-status");
     const body = (await res.json()) as {
       lastRun: { at: string; ok: boolean; note: string } | null;
       inFlight: boolean;
@@ -658,7 +699,7 @@ describe("GET /portfolio/sync-status", () => {
 
 describe("GET /portfolio/news", () => {
   it("returns the documented JSON shape with default days=7 (no ticker)", async () => {
-    const res = await portfolio.request("/news");
+    const res = await authedRequest("/news");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       ticker: string | null;
@@ -673,14 +714,14 @@ describe("GET /portfolio/news", () => {
   });
 
   it("uppercases and echoes the ticker filter in the response", async () => {
-    const res = await portfolio.request("/news?ticker=aapl");
+    const res = await authedRequest("/news?ticker=aapl");
     const body = (await res.json()) as { ticker: string; days: number };
     expect(body.ticker).toBe("AAPL");
     expect(body.days).toBe(7);
   });
 
   it("returns empty news for an unknown ticker (status 200, not 404)", async () => {
-    const res = await portfolio.request("/news?ticker=ZZZZZZ");
+    const res = await authedRequest("/news?ticker=ZZZZZZ");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       ticker: string;
@@ -715,7 +756,7 @@ describe("GET /portfolio/news", () => {
         ] as unknown as Array<typeof newsItems.$inferSelect>,
     );
 
-    const res = await portfolio.request("/news?ticker=AAPL");
+    const res = await authedRequest("/news?ticker=AAPL");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       count: number;
@@ -736,17 +777,17 @@ describe("GET /portfolio/news", () => {
   });
 
   it("rejects non-numeric days with 400 via zValidator", async () => {
-    const res = await portfolio.request("/news?days=foo");
+    const res = await authedRequest("/news?days=foo");
     expect(res.status).toBe(400);
   });
 
   it("rejects days=0 with 400 (must be >= 1)", async () => {
-    const res = await portfolio.request("/news?days=0");
+    const res = await authedRequest("/news?days=0");
     expect(res.status).toBe(400);
   });
 
   it("rejects days=31 with 400 (must be <= 30)", async () => {
-    const res = await portfolio.request("/news?days=31");
+    const res = await authedRequest("/news?days=31");
     expect(res.status).toBe(400);
   });
 
@@ -754,7 +795,7 @@ describe("GET /portfolio/news", () => {
     newsAll.mockImplementation(() => {
       throw new Error("simulated DB failure");
     });
-    const res = await portfolio.request("/news");
+    const res = await authedRequest("/news");
     expect(res.status).toBe(500);
     const body = (await res.json()) as { message: string };
     expect(body).toEqual({ message: "Error fetching news" });

@@ -14,6 +14,21 @@ import { requireSession } from "../lib/session";
 
 const portfolio = new Hono();
 
+// Auth for the whole mount, reads included.
+//
+// The reads here are not public data: GET /investments returns tickers,
+// company names and **share counts**, which is the account's position sizing.
+// Until now only the writes carried `requireSession`, so anyone who could
+// reach the port could enumerate holdings — CORS does not help, since a
+// direct (non-browser) request never consults it and these routes needed no
+// credentials at all.
+//
+// Applied at the mount rather than per-route so a future handler is authed
+// by default instead of opt-in. Matches `crm.use("*", requireSession)`.
+// The client is safe here: every page that reads /portfolio/* renders under
+// `client/src/pages/Landing.tsx`, which already blocks on `useAuth`.
+portfolio.use("*", requireSession);
+
 /**
  * Zod schema for POST /portfolio/investments. Mirrors the column shape in
  * server/db/schema.ts:
@@ -47,15 +62,14 @@ const createInvestmentSchema = z.object({
 /**
  * POST /portfolio/investments
  *
- * Creates a new ticker holding. Auth is required (the existing `requireSession`
- * middleware is reused per the spec — no new auth wiring). 201 returns the
+ * Creates a new ticker holding. Auth is inherited from the mount-wide
+ * `portfolio.use("*", requireSession)` above. 201 returns the
  * inserted row; 409 indicates a duplicate ticker caught by the pre-check
  * (case-insensitive, since we uppercase before insert and store); 400 is
  * the default zValidator response on schema failure.
  */
 portfolio.post(
   "/investments",
-  requireSession,
   zValidator("json", createInvestmentSchema),
   async (c) => {
     const body = c.req.valid("json");
@@ -118,7 +132,8 @@ function parseInvestmentId(raw: string | undefined): number | null {
 /**
  * DELETE /portfolio/investments/:id
  *
- * Hard-deletes an investment. Auth required.
+ * Hard-deletes an investment. Auth inherited from the mount-wide
+ * `requireSession` above.
  *
  * Cascade strategy: the schema declares `priceSnapshots.investment_id` and
  * `newsItems.investment_id` as FK references to `investments.id`, but WITHOUT
@@ -130,7 +145,7 @@ function parseInvestmentId(raw: string | undefined): number | null {
  * rest of the codebase does not use it (per the spec's "do not introduce
  * new patterns" constraint).
  */
-portfolio.delete("/investments/:id", requireSession, async (c) => {
+portfolio.delete("/investments/:id", async (c) => {
   const id = parseInvestmentId(c.req.param("id"));
   if (id === null) {
     return c.json({ message: "Invalid id parameter" }, 400);
