@@ -1,4 +1,4 @@
-// File-backed session store. 
+// File-backed session store.
 //
 // ---------------
 // session.ts used a module-level `const sessions = new Map<>()`. Bun's
