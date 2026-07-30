@@ -76,7 +76,7 @@ Four core tables drive the app:
 
 **Pipeline 1: Mail Brief (Gmail → Gemini → React Dashboard)**
 
-1. User OAuth login → session created in `server/lib/session.ts` (in-memory Map)
+1. User OAuth login → session created via `server/lib/session.ts` (file-backed store, see §6)
 2. `GET /gmail/labels` → returns Gmail labels
 3. User picks label + date range → `GET /gmail/messages` decodes raw emails
 4. `POST /summarize` → calls Gemini once per email, returns structured summaries. Authed (`summarize.use("*", requireSession)`) and bounded: max 50 emails/request, 50k chars per `body`/`snippet`, 2k per header field. The 8s inter-call throttle is skipped after the final email. These caps exist because the route spends the server's Gemini quota and holds the connection open for its whole duration — don't raise them without thinking about both.
@@ -187,9 +187,11 @@ client/
 
 ### 6. Sessions & Restart Behavior
 
-- Sessions stored in-memory Map (`server/lib/session.ts`), lost on backend restart
+- Sessions are **file-backed**, not in-memory: `server/lib/sessionStore.ts` persists them as JSON at `SESSION_FILE` (default `./sessions.json`, gitignored, mode `0600`). `server/lib/session.ts` re-exports `createSession`/`getSession`/`deleteSession` from it and adds `requireSession`.
+- Sessions therefore **survive a restart**, including `bun --watch` reloads. The old in-memory Map dropped every active session on reload while the browser still held the cookie, which surfaced as a spurious 401 right after login.
+- `sessionFilePath()` re-reads `SESSION_FILE` on every call rather than caching it at module load, so tests can repoint storage without a restart.
+- Writes are atomic (temp file in the same directory + `rename(2)`). Don't "simplify" that back to a bare `writeFileSync`: it truncates before writing, and `readAll()` treats truncated JSON as `{}`, so a crash or an interleaved read mid-write silently logs out every user.
 - OAuth tokens are refreshed automatically by Google's library (access_type: "offline")
-- Expected behavior: Users stay logged in until server restarts
 
 ### 7. Frontend Vite Proxy vs. Direct VITE_BACKEND_URL
 
@@ -210,6 +212,14 @@ client/
 - `server/db/syncMarketData.ts` — same-day skip, all-zero quote rejection, news idempotency, in-flight guard
 - `server/__tests__/finnhub_flow.test.ts` — end-to-end Finnhub pull → DB insert
 
+**`bun run test` runs TWO `bun test` processes — don't collapse it back to one.**
+
+- `test:mocked-session` — everything except the two suites below.
+- `test:real-session` — `sessionStore.test.ts` and `summarize.test.ts`, which need the genuine `lib/session`.
+- Why: `mock.module()` is **process-global and permanent** in Bun (`mock.restore()` does not undo it). `crm`, `portfolio`, `gmail` and `errorHandler` tests all replace `"../../lib/session"`, and because `session.ts` re-exports the store functions from `./sessionStore`, that mock also reaches anything importing `../sessionStore` directly. In one process the outcome depends purely on file load order: `sessionStore.test.ts` calls `errorHandler.test`'s throwing `getSession` stub, and `summarize.test.ts` silently gets a stubbed `requireSession` instead of the production one it exists to verify. Two suites were `it.skip`'d over this, misdiagnosed in-comment as a "concurrent runner race".
+- Adding a suite that needs the real `lib/session`? Add it to **both** the `test:real-session` list and the `--path-ignore-patterns` flags.
+- Session storage is isolated **per test** via `useIsolatedSessionFile()` (`server/test-utils/sessionFile.ts`): a fresh `mkdtemp` dir per test, env restored afterwards. Never point `SESSION_FILE` at a shared path in a test — on any gap in the env, `sessionFilePath()` falls back to `./sessions.json` and the run writes into the repo root.
+
 **CI runs** (`.github/workflows/test.yml`):
 
 - `bun run typecheck`
@@ -222,8 +232,8 @@ client/
 
 **Limitations:**
 
-- Sessions lost on backend restart (in-memory only)
-- Sessions are not persisted (see above); `SESSION_SECRET` is declared in `.env.example` but read nowhere in the codebase
+- Sessions persist across restarts (see §6) but are stored unencrypted on the local disk and never expire out of the file on their own — a dead row is only removed when `requireSession` next sees it past `expiresAt`. There is no reaper.
+- `SESSION_SECRET` is declared in `.env.example` but read nowhere in the codebase (the store does not sign or encrypt anything)
 - Frontend uses CDN-bundled Tailwind (no PostCSS build), inline styles in components
 - CSV export is not implemented at all — no route, no file (the Vite proxy entry for `/export` is vestigial)
 
