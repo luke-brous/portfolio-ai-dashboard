@@ -7,6 +7,7 @@ import summarize from "./routes/summarize";
 import portfolio from "./routes/portfolio";
 import crm from "./routes/crm";
 import { logger } from "./logger";
+import { requireSession } from "./lib/session";
 import { syncMarketData } from "./db/syncMarketData";
 import {
   getLastRun,
@@ -116,7 +117,10 @@ if (process.env.FINNHUB_SYNC_ENABLED !== "0") {
 // Legacy status endpoint — shape preserved for the dashboard "last updated"
 // widget. Do NOT add fields here; /portfolio/sync-status exposes the richer
 // snapshot ({ lastRun, inFlight }) via getSyncSnapshot().
-app.get("/sync/last-run", (c) =>
+//
+// Authed to match its twin: /portfolio/* is now behind `requireSession`, and
+// leaving this open would be an unauthenticated read of the same state.
+app.get("/sync/last-run", requireSession, (c) =>
   c.json({ lastRun: getLastRun(), inFlight: isSyncInFlight() }),
 );
 

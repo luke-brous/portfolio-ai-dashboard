@@ -7,7 +7,9 @@
     "dev:client": "cd client && bun run dev",
     "dev": "bun run dev:server & bun run dev:client",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun run test:mocked-session && bun run test:real-session",
+    "test:mocked-session": "bun test --path-ignore-patterns='**/sessionStore.test.ts' --path-ignore-patterns='**/summarize.test.ts'",
+    "test:real-session": "bun test server/lib/__tests__/sessionStore.test.ts server/routes/__tests__/summarize.test.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

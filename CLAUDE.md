@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Workflow — Read First
+
+**Never open a pull request unless explicitly told to.** The repo owner does all committing, pushing, and PR creation. Do not run `git commit`, `git push`, or `gh pr create` on your own initiative — not even at the end of a task that "feels done", and not because a branch looks ready.
+
+Leave finished work as **uncommitted changes in the working checkout** and say what you changed. That is the deliverable.
+
+Corollary: work in the checkout the dev server is actually running. A fix committed to a side branch or an isolated worktree does not reach `bun run dev`, so it will look like the fix silently did nothing.
+
 ## Project Overview
 
 **Mail Brief** is a full-stack personal dashboard combining three major features:
@@ -68,10 +76,10 @@ Four core tables drive the app:
 
 **Pipeline 1: Mail Brief (Gmail → Gemini → React Dashboard)**
 
-1. User OAuth login → session created in `server/lib/session.ts` (in-memory Map)
+1. User OAuth login → session created via `server/lib/session.ts` (file-backed store, see §6)
 2. `GET /gmail/labels` → returns Gmail labels
 3. User picks label + date range → `GET /gmail/messages` decodes raw emails
-4. `POST /summarize` → calls Gemini once per email, returns structured summaries
+4. `POST /summarize` → calls Gemini once per email, returns structured summaries. Authed (`summarize.use("*", requireSession)`) and bounded: max 50 emails/request, 50k chars per `body`/`snippet`, 2k per header field. The 8s inter-call throttle is skipped after the final email. These caps exist because the route spends the server's Gemini quota and holds the connection open for its whole duration — don't raise them without thinking about both.
 5. CSV export — **not implemented**. There is no `/export` route registered in `server/index.ts` and no `server/routes/export.ts` file. `client/vite.config.ts` still proxies `/export`, so the path is reserved but unbuilt.
 
 **Pipeline 2: Advisor Intelligence (Finnhub Daily Sync → Local Read API)**
@@ -80,11 +88,13 @@ Four core tables drive the app:
 - `GET /portfolio/investments` — joins with latest + previous snapshot for day-over-day delta
 - `GET /portfolio/news?ticker=&days=N` — recent news for a ticker or full portfolio
 - `GET /portfolio/sync-status` — returns last Finnhub run timestamp
+- **Auth:** the whole mount is behind `portfolio.use("*", requireSession)` — reads included, since `GET /investments` returns share counts. Do not add an unauthenticated route here. The legacy twin `GET /sync/last-run` in `server/index.ts` is authed for the same reason.
 
 **Pipeline 3: CRM (Nonprofits + Correspondence)**
 
 - Similar to Mail Brief but scoped per nonprofit
-- Routes: `GET /crm/nonprofits`, `POST /crm/reports`, etc. (see server/routes/crm.ts)
+- Routes: `GET|POST /crm/nonprofits`, `PATCH|DELETE /crm/nonprofits/:id` (see server/routes/crm.ts). `/crm/reports` is not implemented.
+- `DELETE` cascades explicitly: `reports.nonprofitId` is a NOT NULL FK, so dependent reports are deleted first (SQLite runs with `PRAGMA foreign_keys` off by default, so nothing enforces this for us)
 - Frontend: Pages under `/crm` route (in progress)
 
 ## File Organization
@@ -113,7 +123,7 @@ server/
 │   ├── gmail.ts               # /labels, /messages (Gmail API wrappers)
 │   ├── summarize.ts           # /summarize (per-email Gemini calls)
 │   ├── portfolio.ts           # /investments, /news, /sync-status (read API)
-│   ├── crm.ts                 # /nonprofits (read-only; /reports NOT implemented)
+│   ├── crm.ts                 # /nonprofits CRUD (list/create/update/delete; /reports NOT implemented)
 │   └── __tests__/
 └── __tests__/
     ├── errorHandler.test.ts   # Global error handler sanitization
@@ -177,15 +187,18 @@ client/
 
 ### 6. Sessions & Restart Behavior
 
-- Sessions stored in-memory Map (`server/lib/session.ts`), lost on backend restart
+- Sessions are **file-backed**, not in-memory: `server/lib/sessionStore.ts` persists them as JSON at `SESSION_FILE` (default `./sessions.json`, gitignored, mode `0600`). `server/lib/session.ts` re-exports `createSession`/`getSession`/`deleteSession` from it and adds `requireSession`.
+- Sessions therefore **survive a restart**, including `bun --watch` reloads. The old in-memory Map dropped every active session on reload while the browser still held the cookie, which surfaced as a spurious 401 right after login.
+- `sessionFilePath()` re-reads `SESSION_FILE` on every call rather than caching it at module load, so tests can repoint storage without a restart.
+- Writes are atomic (temp file in the same directory + `rename(2)`). Don't "simplify" that back to a bare `writeFileSync`: it truncates before writing, and `readAll()` treats truncated JSON as `{}`, so a crash or an interleaved read mid-write silently logs out every user.
 - OAuth tokens are refreshed automatically by Google's library (access_type: "offline")
-- Expected behavior: Users stay logged in until server restarts
 
 ### 7. Frontend Vite Proxy vs. Direct VITE_BACKEND_URL
 
 - `client/vite.config.ts` proxies `/auth`, `/gmail`, `/summarize`, `/export`, `/portfolio`, and `/crm` to the backend
-- `/portfolio` and `/crm` **are** proxied — all client hooks can and do use relative paths via `client/src/lib/api.ts`. There is no need for `VITE_BACKEND_URL` in dev.
-- Because the Vite proxy makes the frontend and API same-origin in dev, the session cookie's `sameSite: "lax"` setting is never exercised cross-site locally. A deploy that splits the client and API across different registrable domains will silently drop the cookie on every XHR — see `demo-readiness.md`.
+- `/portfolio` and `/crm` **are** proxied — all client hooks use relative paths via `client/src/lib/api.ts`.
+- **Invariant: never call `fetch` directly and never interpolate `VITE_BACKEND_URL` in a hook.** Go through `apiGet` / `apiPost` / `apiMutate`, which resolve the path against the backend origin in one place (`apiUrl`). The `sessionId` cookie is set by `/auth/callback` on the _backend_ origin and is host-only, so a call that leaks onto the frontend origin (a bare relative path when `VITE_BACKEND_URL` points elsewhere, as in Codespaces where :5173 and :3000 are separate hosts) arrives cookieless and 401s. This is exactly what broke the Advisor/CRM create forms: reads used the absolute backend URL, writes used relative paths, and at the time only the writes carried `requireSession` (all of `/portfolio/*` is authed now, so that asymmetry no longer masks the bug — a leaked path 401s immediately). Every hook now routes through `apiGet` / `apiMutate`; `Landing.tsx` and `Navbar.tsx` use `apiUrl` for their `window.location.replace` targets.
+- If the client and API are genuinely cross-site, `SameSite=Lax` also drops the cookie on cross-site XHR. Set `SESSION_COOKIE_SAMESITE=none` (see `server/lib/cookieOptions.ts`) for that deployment shape.
 - See README for env var guidance
 
 ## Testing Strategy
@@ -199,6 +212,14 @@ client/
 - `server/db/syncMarketData.ts` — same-day skip, all-zero quote rejection, news idempotency, in-flight guard
 - `server/__tests__/finnhub_flow.test.ts` — end-to-end Finnhub pull → DB insert
 
+**`bun run test` runs TWO `bun test` processes — don't collapse it back to one.**
+
+- `test:mocked-session` — everything except the two suites below.
+- `test:real-session` — `sessionStore.test.ts` and `summarize.test.ts`, which need the genuine `lib/session`.
+- Why: `mock.module()` is **process-global and permanent** in Bun (`mock.restore()` does not undo it). `crm`, `portfolio`, `gmail` and `errorHandler` tests all replace `"../../lib/session"`, and because `session.ts` re-exports the store functions from `./sessionStore`, that mock also reaches anything importing `../sessionStore` directly. In one process the outcome depends purely on file load order: `sessionStore.test.ts` calls `errorHandler.test`'s throwing `getSession` stub, and `summarize.test.ts` silently gets a stubbed `requireSession` instead of the production one it exists to verify. Two suites were `it.skip`'d over this, misdiagnosed in-comment as a "concurrent runner race".
+- Adding a suite that needs the real `lib/session`? Add it to **both** the `test:real-session` list and the `--path-ignore-patterns` flags.
+- Session storage is isolated **per test** via `useIsolatedSessionFile()` (`server/test-utils/sessionFile.ts`): a fresh `mkdtemp` dir per test, env restored afterwards. Never point `SESSION_FILE` at a shared path in a test — on any gap in the env, `sessionFilePath()` falls back to `./sessions.json` and the run writes into the repo root.
+
 **CI runs** (`.github/workflows/test.yml`):
 
 - `bun run typecheck`
@@ -211,8 +232,8 @@ client/
 
 **Limitations:**
 
-- Sessions lost on backend restart (in-memory only)
-- Sessions are not persisted (see above); `SESSION_SECRET` is declared in `.env.example` but read nowhere in the codebase
+- Sessions persist across restarts (see §6) but are stored unencrypted on the local disk and never expire out of the file on their own — a dead row is only removed when `requireSession` next sees it past `expiresAt`. There is no reaper.
+- `SESSION_SECRET` is declared in `.env.example` but read nowhere in the codebase (the store does not sign or encrypt anything)
 - Frontend uses CDN-bundled Tailwind (no PostCSS build), inline styles in components
 - CSV export is not implemented at all — no route, no file (the Vite proxy entry for `/export` is vestigial)
 
@@ -247,6 +268,7 @@ client/
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
 Rules:
+
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.

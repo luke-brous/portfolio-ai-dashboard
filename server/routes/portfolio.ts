@@ -10,8 +10,189 @@ import { logger } from "../logger";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import { getLastRun, isSyncInFlight } from "../lib/syncState";
+import { requireSession } from "../lib/session";
 
 const portfolio = new Hono();
+
+// Auth for the whole mount, reads included.
+//
+// The reads here are not public data: GET /investments returns tickers,
+// company names and **share counts**, which is the account's position sizing.
+// Until now only the writes carried `requireSession`, so anyone who could
+// reach the port could enumerate holdings — CORS does not help, since a
+// direct (non-browser) request never consults it and these routes needed no
+// credentials at all.
+//
+// Applied at the mount rather than per-route so a future handler is authed
+// by default instead of opt-in. Matches `crm.use("*", requireSession)`.
+// The client is safe here: every page that reads /portfolio/* renders under
+// `client/src/pages/Landing.tsx`, which already blocks on `useAuth`.
+portfolio.use("*", requireSession);
+
+/**
+ * Zod schema for POST /portfolio/investments. Mirrors the column shape in
+ * server/db/schema.ts:
+ *   - `ticker`        text NOT NULL UNIQUE — trim + uppercase before insert
+ *                     so the value matches the DB-level UNIQUE constraint
+ *                     AND the case-insensitive dedup pre-check
+ *   - `companyName`   text NOT NULL
+ *   - `sector`        text (nullable on the column, but enforced required
+ *                     here so we never insert a "blank sector" row in v1)
+ *   - `shares`        real NOT NULL — must be positive, finite
+ *
+ * `percentOfAccount` is intentionally NOT accepted: it's a derived/portfolio-
+ * relative value and the brief specifies out-of-scope rebalancing. Leaving
+ * it null on insert matches the CrmCard read path ("—" placeholder).
+ */
+const createInvestmentSchema = z.object({
+  ticker: z
+    .string()
+    .trim()
+    .min(1, "ticker is required")
+    .max(10, "ticker is too long")
+    .transform((s) => s.toUpperCase()),
+  companyName: z.string().trim().min(1, "companyName is required"),
+  sector: z.string().trim().min(1, "sector is required"),
+  shares: z
+    .number({ error: "shares must be a number" })
+    .positive("shares must be positive")
+    .finite("shares must be finite"),
+});
+
+/**
+ * POST /portfolio/investments
+ *
+ * Creates a new ticker holding. Auth is inherited from the mount-wide
+ * `portfolio.use("*", requireSession)` above. 201 returns the
+ * inserted row; 409 indicates a duplicate ticker caught by the pre-check
+ * (case-insensitive, since we uppercase before insert and store); 400 is
+ * the default zValidator response on schema failure.
+ */
+portfolio.post(
+  "/investments",
+  zValidator("json", createInvestmentSchema),
+  async (c) => {
+    const body = c.req.valid("json");
+    try {
+      // Pre-check catches duplicates without round-tripping the DB constraint
+      // error through the 500 envelope. The DB also enforces UNIQUE on
+      // `ticker` at the column level — this pre-check is purely for a
+      // tidier 409 message. `body.ticker` is already uppercased by the
+      // Zod transform, so a simple `.where(eq(ticker, X))` is sufficient.
+      const existing = await db
+        .select()
+        .from(investments)
+        .where(eq(investments.ticker, body.ticker))
+        .get();
+      if (existing) {
+        return c.json({ message: `Ticker ${body.ticker} already exists` }, 409);
+      }
+      const inserted = await db
+        .insert(investments)
+        .values({
+          ticker: body.ticker,
+          companyName: body.companyName,
+          sector: body.sector,
+          shares: body.shares,
+        })
+        .returning()
+        .all();
+      const row = inserted[0];
+      if (!row) {
+        return c.json({ message: "Insert returned no row" }, 500);
+      }
+      logger.info({
+        method: "POST",
+        path: "/portfolio/investments",
+        ticker: row.ticker,
+      });
+      return c.json(row, 201);
+    } catch (error) {
+      logger.error(
+        { err: error, path: c.req.path },
+        "Error inserting investment",
+      );
+      return c.json({ message: "Error inserting investment" }, 500);
+    }
+  },
+);
+
+/**
+ * Validate a `:id` route param (used by DELETE) as a positive integer.
+ * Returns the parsed id, or null if the param is not a clean positive int.
+ * A non-numeric / non-positive id is a client error (400), not a 404.
+ */
+function parseInvestmentId(raw: string | undefined): number | null {
+  if (raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
+/**
+ * DELETE /portfolio/investments/:id
+ *
+ * Hard-deletes an investment. Auth inherited from the mount-wide
+ * `requireSession` above.
+ *
+ * Cascade strategy: the schema declares `priceSnapshots.investment_id` and
+ * `newsItems.investment_id` as FK references to `investments.id`, but WITHOUT
+ * an `onDelete: "cascade"` clause. SQLite will therefore raise an FK
+ * constraint failure on the `DELETE FROM investments` step if dependents
+ * exist (subject to PRAGMA foreign_keys). To keep the deletion clean and
+ * deterministic regardless of the per-connection FK pragma, we explicitly
+ * delete the dependent rows first. No db.transaction is used because the
+ * rest of the codebase does not use it (per the spec's "do not introduce
+ * new patterns" constraint).
+ */
+portfolio.delete("/investments/:id", async (c) => {
+  const id = parseInvestmentId(c.req.param("id"));
+  if (id === null) {
+    return c.json({ message: "Invalid id parameter" }, 400);
+  }
+
+  try {
+    const existing = await db
+      .select()
+      .from(investments)
+      .where(eq(investments.id, id))
+      .get();
+    if (!existing) {
+      return c.json({ message: "Investment not found" }, 404);
+    }
+
+    // Explicit cascade: delete snapshots and news items first so the
+    // investment's FK references resolve cleanly even when the SQLite
+    // session has PRAGMA foreign_keys = ON.
+    await db
+      .delete(priceSnapshots)
+      .where(eq(priceSnapshots.investmentId, id))
+      .run();
+    await db.delete(newsItems).where(eq(newsItems.investmentId, id)).run();
+
+    const deleted = await db
+      .delete(investments)
+      .where(eq(investments.id, id))
+      .returning()
+      .all();
+
+    if (deleted.length === 0) {
+      // Race condition: someone else deleted the row between our select
+      // and our delete. Surface as 404 for parity with the earlier check.
+      return c.json({ message: "Investment not found" }, 404);
+    }
+
+    logger.info({
+      method: "DELETE",
+      path: "/portfolio/investments/:id",
+      id,
+    });
+    return c.body(null, 204);
+  } catch (error) {
+    logger.error({ err: error, path: c.req.path }, "Error deleting investment");
+    return c.json({ message: "Error deleting investment" }, 500);
+  }
+});
 
 /**
  * Mirror of the legacy `/sync/last-run` handler in server/index.ts
