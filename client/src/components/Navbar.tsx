@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
+import { apiUrl } from "../lib/api";
 
 const tabs = [
   { to: "/landing/mailbrief", label: "Mailbrief" },
@@ -13,8 +14,9 @@ export default function Navbar() {
   const handleLogout = () => {
     // Nuke the cached data that is still there before redirecting
     queryClient.clear();
-    const backendURL = import.meta.env.VITE_BACKEND_URL;
-    window.location.replace(`${backendURL}/auth/logout`);
+    // `apiUrl` so the backend origin is resolved in one place — see the
+    // invariant in client/src/lib/api.ts.
+    window.location.replace(apiUrl("/auth/logout"));
   };
 
   return (

@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { apiGet } from "../lib/api";
 import type { Email } from "../types";
 
 const fetchEmails = async (
@@ -11,20 +12,9 @@ const fetchEmails = async (
     before: dateRange.before,
   });
 
-  const backendURL = import.meta.env.VITE_BACKEND_URL;
-
-  const response = await fetch(
-    `${backendURL}/gmail/messages?${queryParams.toString()}`,
-    {
-      credentials: "include",
-    },
+  const data = await apiGet<{ messages?: Email[] }>(
+    `/gmail/messages?${queryParams.toString()}`,
   );
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch emails");
-  }
-
-  const data = await response.json();
   return data.messages || [];
 };
 

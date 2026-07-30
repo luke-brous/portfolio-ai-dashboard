@@ -1,4 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
+import { apiMutate } from "../lib/api";
 import type { Email, Summary } from "../types";
 
 interface SummarizeRequest {
@@ -6,24 +7,13 @@ interface SummarizeRequest {
 }
 
 export function useSummarizeMutation() {
-  const backendURL = import.meta.env.VITE_BACKEND_URL;
-
   return useMutation<Summary[], Error, SummarizeRequest>({
     mutationFn: async (data: SummarizeRequest) => {
-      const response = await fetch(`${backendURL}/summarize`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(data),
-        credentials: "include",
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to summarize emails");
-      }
-
-      const result = await response.json();
+      const result = await apiMutate<{ summaries: Summary[] }>(
+        "POST",
+        "/summarize",
+        data,
+      );
       return result.summaries;
     },
   });

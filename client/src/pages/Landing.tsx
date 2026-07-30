@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import { apiUrl } from "../lib/api";
 import Navbar from "../components/Navbar";
 
 export default function Landing() {
@@ -8,8 +9,9 @@ export default function Landing() {
 
   useEffect(() => {
     if (!authLoading && !authData?.isAuthed) {
-      const backendURL = import.meta.env.VITE_BACKEND_URL;
-      window.location.replace(`${backendURL}/auth/login`);
+      // `apiUrl` so the backend origin is resolved in one place — see the
+      // invariant in client/src/lib/api.ts.
+      window.location.replace(apiUrl("/auth/login"));
     }
   }, [authData, authLoading]);
 
