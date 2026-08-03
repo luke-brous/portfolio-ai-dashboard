@@ -17,6 +17,14 @@ mock.module("googleapis", () => ({
     auth: {
       OAuth2: class {
         setCredentials() {}
+        // The real OAuth2Client extends EventEmitter, and `requireSession`
+        // subscribes to its "tokens" event to persist refreshed credentials.
+        // Keep this in step with that contract: `mock.module("googleapis")`
+        // is process-global and permanent in Bun, so an incomplete fake here
+        // leaks into every other suite in the run — omitting `on` made all
+        // 32 portfolio tests fail with "oauthClient.on is not a function"
+        // while portfolio.test.ts passed perfectly well on its own.
+        on() {}
       },
     },
     gmail: () => ({
