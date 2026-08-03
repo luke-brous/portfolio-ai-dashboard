@@ -158,7 +158,9 @@ export function updateSessionTokens(
       tokens: {
         ...existing.tokens,
         ...(tokens.access_token ? { access_token: tokens.access_token } : {}),
-        ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
+        ...(tokens.refresh_token
+          ? { refresh_token: tokens.refresh_token }
+          : {}),
         ...(tokens.expiry_date ? { expiry_date: tokens.expiry_date } : {}),
       },
     };

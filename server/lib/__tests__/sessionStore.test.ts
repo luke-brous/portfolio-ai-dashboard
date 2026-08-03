@@ -210,6 +210,8 @@ describe("updateSessionTokens", () => {
     // credentials for the current request. The helper's afterEach restores
     // SESSION_FILE, so this does not leak into the next test.
     process.env.SESSION_FILE = "/proc/definitely/not/writable/sessions.json";
-    expect(() => updateSessionTokens("s1", { access_token: "b" })).not.toThrow();
+    expect(() =>
+      updateSessionTokens("s1", { access_token: "b" }),
+    ).not.toThrow();
   });
 });

@@ -1159,7 +1159,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     expect(summarizeCalls).toEqual([]);
   });
 
-  it("returns 422 for a bare \"N/A\" contactEmail", async () => {
+  it('returns 422 for a bare "N/A" contactEmail', async () => {
     nonprofitsAll.mockImplementation(() => [
       makeNonprofit({ id: 1, contactEmail: "N/A" }),
     ]);
