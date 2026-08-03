@@ -129,6 +129,46 @@ export function getSession(id: string): SessionData | undefined {
 }
 
 /**
+ * Merge refreshed OAuth credentials into an existing session.
+ *
+ * Google's client refreshes an expired access token on demand, but only in
+ * the memory of the client instance that did it. `requireSession` builds a
+ * fresh client per request, so without writing the new credentials back here
+ * every request would re-refresh — and once Google rotates a refresh token,
+ * the rotated value would be lost entirely and the session would be dead.
+ *
+ * Merges rather than replaces: the `tokens` event usually carries only a new
+ * `access_token`, and a naive overwrite would drop the `refresh_token` that
+ * makes the next refresh possible.
+ *
+ * No-op if the session is gone (logged out mid-flight). Never throws — a
+ * failed cache-refresh write must not take down the request that triggered
+ * it; the caller still holds working credentials for this request.
+ */
+export function updateSessionTokens(
+  id: string,
+  tokens: Partial<SessionData["tokens"]>,
+): void {
+  try {
+    const map = readAll();
+    const existing = map[id];
+    if (!existing) return;
+    map[id] = {
+      ...existing,
+      tokens: {
+        ...existing.tokens,
+        ...(tokens.access_token ? { access_token: tokens.access_token } : {}),
+        ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
+        ...(tokens.expiry_date ? { expiry_date: tokens.expiry_date } : {}),
+      },
+    };
+    writeAll(map);
+  } catch (err) {
+    console.error(`[sessionStore] could not persist refreshed tokens:`, err);
+  }
+}
+
+/**
  * Remove a session entry. No-op if it doesn't already exist; matches
  * Map.delete semantics so `requireSession`'s "cookie present but
  * session missing" 401 path stays unchanged.
