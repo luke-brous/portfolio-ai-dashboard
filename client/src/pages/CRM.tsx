@@ -2,6 +2,7 @@ import { useState } from "react";
 import useNonProfits, { useDeleteNonprofit } from "../hooks/useNonProfits";
 import CrmCard from "../components/CrmCard";
 import CrmSkeleton from "../components/CrmSkeleton";
+import CorrespondencePanel from "../components/CorrespondencePanel";
 import NonprofitForm from "../components/NonprofitForm";
 import type { Nonprofit } from "../types";
 
@@ -16,6 +17,17 @@ export default function CRM() {
   // — no need to make them server state.
   const [editingId, setEditingId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  // Which rows have their correspondence panel open. A Set rather than a
+  // single id so several nonprofits can be compared side by side — the
+  // point of the panel is reviewing grantees against each other.
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+
+  const toggleExpanded = (id: number) =>
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
 
   const del = useDeleteNonprofit();
   // Which row's delete is in flight, so only that row's button disables.
@@ -122,6 +134,8 @@ export default function CRM() {
               onDone={() => setEditingId(null)}
               onDelete={() => void handleDelete(np)}
               isDeleting={pendingDeleteId === np.id}
+              isExpanded={expandedIds.has(np.id)}
+              onToggleExpanded={() => toggleExpanded(np.id)}
             />
           ))}
         </div>
@@ -143,6 +157,8 @@ function NonprofitRow({
   onDone,
   onDelete,
   isDeleting = false,
+  isExpanded = false,
+  onToggleExpanded,
 }: {
   np: Nonprofit;
   isEditing: boolean;
@@ -150,6 +166,8 @@ function NonprofitRow({
   onDone: () => void;
   onDelete: () => void;
   isDeleting?: boolean;
+  isExpanded?: boolean;
+  onToggleExpanded: () => void;
 }) {
   if (isEditing) {
     return <NonprofitForm existing={np} onDone={onDone} />;
@@ -160,6 +178,16 @@ function NonprofitRow({
   return (
     <div className={isDeleting ? "opacity-60 transition-opacity" : undefined}>
       <div className="mb-1 flex justify-end gap-1">
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          disabled={isDeleting}
+          aria-expanded={isExpanded}
+          aria-label={`${isExpanded ? "Hide" : "Show"} correspondence for ${np.name}`}
+          className="rounded-md px-3 py-1.5 text-sm font-medium text-slate-600 transition-colors duration-200 hover:bg-slate-100 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isExpanded ? "Hide correspondence" : "Correspondence"}
+        </button>
         <button
           type="button"
           onClick={onEdit}
@@ -181,6 +209,7 @@ function NonprofitRow({
         </button>
       </div>
       <CrmCard nonprofit={np} />
+      {isExpanded && <CorrespondencePanel nonprofit={np} />}
     </div>
   );
 }
