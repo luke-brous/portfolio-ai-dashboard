@@ -11,7 +11,12 @@
 // `deleteSession` API so existing tests' `mock.module("../../lib/session", ...)`
 // keeps working without modification.
 
-import { createSession, deleteSession, getSession } from "./sessionStore";
+import {
+  createSession,
+  deleteSession,
+  getSession,
+  updateSessionTokens,
+} from "./sessionStore";
 import { google } from "googleapis";
 import { getOAuthClient } from "./google-client";
 import { getCookie } from "hono/cookie";
@@ -19,7 +24,7 @@ import { Context, Next } from "hono";
 
 // Re-export the helpers so existing `import { createSession } from "../lib/session"`
 // call sites continue to compile. The runtime is now file-backed.
-export { createSession, deleteSession, getSession };
+export { createSession, deleteSession, getSession, updateSessionTokens };
 
 // Legacy helper for routes that need to access the Gmail API client.
 //
@@ -55,6 +60,25 @@ export async function requireSession(c: Context, next: Next) {
 
   const oauthClient = getOAuthClient();
   oauthClient.setCredentials(session.tokens);
+
+  // Persist credentials that Google's client refreshes for us.
+  //
+  // The client renews an expired access token transparently, but only on the
+  // instance that did it — and this builds a new instance every request. With
+  // nothing written back, every request re-refreshed, and a rotated refresh
+  // token was lost outright, which killed the session for good. Sessions then
+  // went dead roughly an hour after login and every Gmail call started
+  // failing (a 500 from /gmail/labels, a 502 from the CRM sync).
+  //
+  // The event fires only on an actual refresh, so this costs nothing on the
+  // common path.
+  oauthClient.on("tokens", (refreshed) => {
+    updateSessionTokens(sessionId, {
+      access_token: refreshed.access_token ?? undefined,
+      refresh_token: refreshed.refresh_token ?? undefined,
+      expiry_date: refreshed.expiry_date ?? undefined,
+    });
+  });
 
   c.set("gmailClient", google.gmail({ version: "v1", auth: oauthClient }));
 

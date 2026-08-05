@@ -1,7 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createSession, deleteSession, getSession } from "../sessionStore";
+import {
+  createSession,
+  deleteSession,
+  getSession,
+  updateSessionTokens,
+} from "../sessionStore";
 import { useIsolatedSessionFile } from "../../test-utils/sessionFile";
 
 // Two independent kinds of shared state used to break this suite. Both
@@ -137,5 +142,76 @@ describe("sessionStore file-backed persistence", () => {
     // returns {} instead of throwing \u2014 keeps the request path safe.
     writeFileSync(sessionFile.path, "{not-valid-json");
     expect(getSession("any")).toBeUndefined();
+  });
+});
+
+describe("updateSessionTokens", () => {
+  // Registers the beforeEach/afterEach hooks that repoint SESSION_FILE at a
+  // fresh temp dir per test. Must be called at describe scope — calling it
+  // inside an `it` throws "Cannot call beforeEach() inside a test".
+  useIsolatedSessionFile();
+
+  it("merges a refreshed access token while preserving the refresh token", () => {
+    createSession("s1", {
+      tokens: {
+        access_token: "old-access",
+        refresh_token: "the-refresh",
+        expiry_date: 1000,
+      },
+      expiresAt: Date.now() + 60_000,
+    });
+
+    // The `tokens` event usually carries only a new access token. A naive
+    // overwrite would drop the refresh token and kill the session for good.
+    updateSessionTokens("s1", {
+      access_token: "new-access",
+      expiry_date: 2000,
+    });
+
+    expect(getSession("s1")?.tokens).toEqual({
+      access_token: "new-access",
+      refresh_token: "the-refresh",
+      expiry_date: 2000,
+    });
+  });
+
+  it("stores a rotated refresh token when Google sends one", () => {
+    createSession("s1", {
+      tokens: { access_token: "a", refresh_token: "old-refresh" },
+      expiresAt: Date.now() + 60_000,
+    });
+
+    updateSessionTokens("s1", { refresh_token: "rotated-refresh" });
+
+    expect(getSession("s1")?.tokens.refresh_token).toBe("rotated-refresh");
+  });
+
+  it("leaves expiresAt (the server-side session cap) untouched", () => {
+    const expiresAt = Date.now() + 60_000;
+    createSession("s1", { tokens: { access_token: "a" }, expiresAt });
+
+    updateSessionTokens("s1", { access_token: "b" });
+
+    expect(getSession("s1")?.expiresAt).toBe(expiresAt);
+  });
+
+  it("is a no-op for an unknown session rather than creating one", () => {
+    updateSessionTokens("never-existed", { access_token: "x" });
+    expect(getSession("never-existed")).toBeUndefined();
+  });
+
+  it("does not throw when the store cannot be written", () => {
+    createSession("s1", {
+      tokens: { access_token: "a" },
+      expiresAt: Date.now() + 60_000,
+    });
+    // Point at an unwritable path. A failed token-cache write must not take
+    // down the request that triggered it — the caller still holds working
+    // credentials for the current request. The helper's afterEach restores
+    // SESSION_FILE, so this does not leak into the next test.
+    process.env.SESSION_FILE = "/proc/definitely/not/writable/sessions.json";
+    expect(() =>
+      updateSessionTokens("s1", { access_token: "b" }),
+    ).not.toThrow();
   });
 });

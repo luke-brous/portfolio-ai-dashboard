@@ -17,6 +17,17 @@ const auth = new Hono();
 auth.get("/login", (c) => {
   const url = getOAuthClient().generateAuthUrl({
     access_type: "offline",
+    // `access_type: "offline"` alone is not enough to get a refresh token.
+    // Google issues one only on the FIRST authorization for a given
+    // client+user; every later login returns just an access token, and
+    // `/callback` then stores `refresh_token: undefined`. The session dies
+    // ~1 hour later with no way to renew, and every Gmail call starts
+    // failing — which reads as the app randomly breaking after login.
+    //
+    // `prompt: "consent"` forces the consent screen every time, which
+    // guarantees a refresh token. The cost is one extra click at login; the
+    // alternative is a session that silently expires mid-demo.
+    prompt: "consent",
     scope: ["https://www.googleapis.com/auth/gmail.readonly"],
   });
   return c.redirect(url);
