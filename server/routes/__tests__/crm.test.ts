@@ -7,6 +7,12 @@ import * as drizzleOrm from "drizzle-orm";
 import crm from "../crm";
 import { nonprofits, reports } from "../../db/schema";
 import { createSession } from "../../lib/session";
+import {
+  getCrmSyncJob,
+  resetCrmSyncStateForTesting,
+  type CrmSyncJob,
+  type CrmSyncResult,
+} from "../../lib/crmSyncState";
 import type { SessionData } from "../../types/session";
 
 // ---------- drizzle-orm mock --------------------------------------------------------
@@ -498,7 +504,9 @@ beforeEach(() => {
   // Belt-and-braces: the override tests clean up in a `finally`, but a leak
   // here would silently retarget every other sync test's Gmail query.
   delete process.env.CRM_GMAIL_LABEL;
-  delete process.env.CRM_SYNC_BUDGET_MS;
+  // Job state is module-level and per-process, so a leftover "running" job
+  // from a previous test would make the next `beginCrmSync` refuse to start.
+  resetCrmSyncStateForTesting();
 });
 
 afterAll(() => {
@@ -1108,6 +1116,75 @@ function makeGmailMessage(
   };
 }
 
+/**
+ * Start a sync. The route hands the run to the background and returns
+ * straight away, so this resolves long before any Gmail or Gemini work.
+ */
+async function startSync(id = 1, query = ""): Promise<Response> {
+  return crm.request(`/nonprofits/${id}/sync${query}`, {
+    method: "POST",
+    headers: { Cookie: authCookie() },
+  });
+}
+
+/**
+ * Block until the background job settles.
+ *
+ * Every assertion about Gmail calls, Gemini calls or written reports has to go
+ * through here: the 202 says only that the run was accepted, so asserting
+ * straight off the response would race the work.
+ */
+async function waitForSync(id = 1, timeoutMs = 5_000): Promise<CrmSyncJob> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const job = getCrmSyncJob(id);
+    if (job && job.status !== "running") return job;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `sync job for nonprofit ${id} did not settle within ${timeoutMs}ms`,
+      );
+    }
+    // 1ms, not a coarser tick: the pacing test measures elapsed time across
+    // this wait, so polling granularity shows up directly in its budget.
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
+/**
+ * A promise the test resolves by hand.
+ *
+ * Tests that need a run to still be in flight must hold it open explicitly
+ * rather than leaning on the Gemini throttle: `server/db/__tests__/
+ * syncMarketData.test.ts` mocks `../lib/utils`, and Bun's `mock.module` is
+ * process-global and permanent (see CLAUDE.md), so in a combined run `sleep`
+ * is a no-op here and a "slow" run finishes in microtasks.
+ */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = () => r();
+  });
+  return { promise, resolve };
+}
+
+/** Start a sync, assert it was accepted, and wait for the run to finish. */
+async function syncAndWait(id = 1, query = ""): Promise<CrmSyncJob> {
+  const res = await startSync(id, query);
+  expect(res.status).toBe(202);
+  return waitForSync(id);
+}
+
+/** As above, for a run expected to succeed — returns its counts. */
+async function completedSync(id = 1, query = ""): Promise<CrmSyncResult> {
+  const job = await syncAndWait(id, query);
+  if (job.status !== "done" || !job.result) {
+    throw new Error(
+      `expected a completed run, got "${job.status}": ${job.error?.message ?? "no error recorded"}`,
+    );
+  }
+  return job.result;
+}
+
 describe("POST /crm/nonprofits/:id/sync", () => {
   it("returns 401 without a session", async () => {
     const res = await crm.request("/nonprofits/1/sync", { method: "POST" });
@@ -1134,14 +1211,13 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     nonprofitsAll.mockImplementation(() => [
       makeNonprofit({ id: 1, contactEmail: null }),
     ]);
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    const res = await startSync();
     expect(res.status).toBe(422);
-    // Nothing should have been spent on a row that can't be synced.
+    // Nothing should have been spent — or even scheduled — for a row that
+    // can't be synced.
     expect(summarizeCalls).toEqual([]);
     expect(gmailQueries).toEqual([]);
+    expect(getCrmSyncJob(1)).toBeNull();
   });
 
   it("returns 422 for a legacy placeholder contactEmail instead of searching", async () => {
@@ -1150,33 +1226,113 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     nonprofitsAll.mockImplementation(() => [
       makeNonprofit({ id: 1, contactEmail: "N/A, # 212-243-7070" }),
     ]);
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    const res = await startSync();
     expect(res.status).toBe(422);
     expect(gmailQueries).toEqual([]);
     expect(summarizeCalls).toEqual([]);
+    expect(getCrmSyncJob(1)).toBeNull();
   });
 
   it('returns 422 for a bare "N/A" contactEmail', async () => {
     nonprofitsAll.mockImplementation(() => [
       makeNonprofit({ id: 1, contactEmail: "N/A" }),
     ]);
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    const res = await startSync();
     expect(res.status).toBe(422);
     expect(gmailQueries).toEqual([]);
   });
 
+  it("rejects an out-of-range `days` window with 400", async () => {
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    const res = await startSync(1, "?days=9999");
+    expect(res.status).toBe(400);
+  });
+
+  // ---- acceptance: the request must not wait for the run --------------------
+
+  it("returns 202 immediately instead of holding the connection for the run", async () => {
+    // The bug this whole shape exists to kill: a request pinned to the Gemini
+    // throttle stayed silent long enough for the proxy in front of the app to
+    // give up, which surfaced in the browser as a CORS error while the server
+    // quietly finished the work anyway.
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    gmailMessages = Array.from({ length: 12 }, (_, i) =>
+      makeGmailMessage(`m${i}`),
+    );
+    // Pin the run open on the very first summary so the assertions below are
+    // about ordering, not wall-clock luck.
+    const gate = deferred();
+    summarizeImpl = async (content) => {
+      await gate.promise;
+      return `summary of: ${content.slice(0, 40)}`;
+    };
+
+    const res = await startSync();
+
+    expect(res.status).toBe(202);
+    expect(await jsonBody(res)).toMatchObject({
+      nonprofitId: 1,
+      status: "running",
+      alreadyRunning: false,
+    });
+
+    // The load-bearing assertion: the response came back while the run was
+    // demonstrably unfinished, so the request cannot have been waiting on it.
+    expect(getCrmSyncJob(1)?.status).toBe("running");
+    expect(reportsStore).toHaveLength(0);
+
+    // ...and the run genuinely continues after the response.
+    gate.resolve();
+    const job = await waitForSync();
+    expect(job.status).toBe("done");
+    expect(job.result).toMatchObject({ summarized: 10 });
+  });
+
+  it("does not start a second run while one is already in flight", async () => {
+    // An impatient double-click must not put two Gemini loops on the same
+    // mailbox — they would race on dedup and double-spend the quota.
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    gmailMessages = [
+      makeGmailMessage("m1"),
+      makeGmailMessage("m2"),
+      makeGmailMessage("m3"),
+    ];
+    const gate = deferred();
+    summarizeImpl = async () => {
+      await gate.promise;
+      return "ok summary";
+    };
+
+    const first = await startSync();
+    expect(await jsonBody(first)).toMatchObject({ alreadyRunning: false });
+
+    // The first run is provably still going — it is blocked on `gate`.
+    const second = await startSync();
+    expect(second.status).toBe(202);
+    expect(await jsonBody(second)).toMatchObject({ alreadyRunning: true });
+
+    gate.resolve();
+    await waitForSync();
+    // One run, not two: each message summarised exactly once.
+    expect(summarizeCalls).toHaveLength(3);
+    expect(reportsStore).toHaveLength(3);
+  });
+
+  it("allows a fresh run once the previous one has settled", async () => {
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    gmailMessages = [makeGmailMessage("m1")];
+    await completedSync();
+
+    gmailMessages = [makeGmailMessage("m1"), makeGmailMessage("m2")];
+    const second = await completedSync();
+    expect(second).toMatchObject({ skipped: 1, summarized: 1 });
+  });
+
+  // ---- label scoping (decided inside the run) ------------------------------
+
   it("scopes the search by labelIds, not the `label:` query operator", async () => {
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-    await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    await syncAndWait();
     expect(gmailQueries).toHaveLength(1);
     // Label travels as an id, matching server/routes/gmail.ts. Putting it in
     // `q` instead would break on names with spaces or nested Parent/Child.
@@ -1191,10 +1347,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
   it("matches the label name case-insensitively", async () => {
     gmailLabels = [{ id: "Label_42", name: "  nonprofit " }];
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-    await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    await syncAndWait();
     expect(gmailLabelIds[0]).toEqual(["Label_42"]);
   });
 
@@ -1202,10 +1355,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     process.env.CRM_GMAIL_LABEL = "Grantees";
     try {
       nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-      await crm.request("/nonprofits/1/sync", {
-        method: "POST",
-        headers: { Cookie: authCookie() },
-      });
+      await syncAndWait();
       expect(gmailLabelIds[0]).toEqual(["Label_9"]);
     } finally {
       delete process.env.CRM_GMAIL_LABEL;
@@ -1216,94 +1366,87 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     process.env.CRM_GMAIL_LABEL = "   ";
     try {
       nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-      await crm.request("/nonprofits/1/sync", {
-        method: "POST",
-        headers: { Cookie: authCookie() },
-      });
+      await syncAndWait();
       expect(gmailLabelIds[0]).toEqual(["Label_7"]);
     } finally {
       delete process.env.CRM_GMAIL_LABEL;
     }
   });
 
-  it("returns 422 when the account has no such label, rather than searching everything", async () => {
+  it("fails the run with 422 when the account has no such label, rather than searching everything", async () => {
     // The dangerous alternative: omitting labelIds makes Gmail search the
     // whole mailbox, silently ingesting far more than intended.
     gmailLabels = [{ id: "INBOX", name: "INBOX" }];
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    const job = await syncAndWait();
 
-    expect(res.status).toBe(422);
-    expect((await jsonBody(res)) as { message: string }).toMatchObject({
+    expect(job.status).toBe("error");
+    expect(job.error).toMatchObject({
+      status: 422,
       message: expect.stringContaining("Nonprofit"),
     });
     expect(gmailQueries).toEqual([]);
     expect(summarizeCalls).toEqual([]);
   });
 
-  it("maps an expired-credentials Gmail error to 401, not 502", async () => {
+  // ---- upstream failures now surface on the job ----------------------------
+
+  it("maps expired credentials on the label lookup to a 401 job error", async () => {
     // A 502 sends you hunting for a Gmail outage; the real fix is to sign in
     // again. googleapis puts the status in different places by error shape,
     // so cover the `response.status` form here and the bare `code` form next.
-    const authErr = Object.assign(new Error("Invalid Credentials"), {
+    gmailLabelsError = Object.assign(new Error("Invalid Credentials"), {
       response: { status: 401 },
     });
-    gmailLabelsError = authErr;
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    const job = await syncAndWait();
 
-    expect(res.status).toBe(401);
-    expect((await jsonBody(res)) as { message: string }).toMatchObject({
+    expect(job.status).toBe("error");
+    expect(job.error).toMatchObject({
+      status: 401,
       message: expect.stringContaining("sign in again"),
     });
   });
 
-  it("maps an expired-credentials error on the message search to 401", async () => {
+  it("maps expired credentials on the message search to a 401 job error", async () => {
     gmailListError = Object.assign(new Error("Invalid Credentials"), {
       code: 401,
     });
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(res.status).toBe(401);
+    const job = await syncAndWait();
+    expect(job.error).toMatchObject({ status: 401 });
   });
 
-  it("returns 502 when the label lookup itself fails", async () => {
+  it("reports a failed label lookup as a 502 job error", async () => {
     gmailLabelsError = new Error("Gmail 503");
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(res.status).toBe(502);
+    const job = await syncAndWait();
+    expect(job.status).toBe("error");
+    expect(job.error).toMatchObject({ status: 502 });
     expect(gmailQueries).toEqual([]);
   });
+
+  it("reports a failed Gmail search as a 502 job error", async () => {
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    gmailListError = new Error("Gmail 503");
+
+    const job = await syncAndWait();
+    expect(job.status).toBe("error");
+    expect(job.error).toMatchObject({ status: 502 });
+    expect(summarizeCalls).toEqual([]);
+  });
+
+  // ---- ingest behaviour ----------------------------------------------------
 
   it("summarizes new messages and records them against the nonprofit", async () => {
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
     gmailMessages = [makeGmailMessage("m1"), makeGmailMessage("m2")];
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(res.status).toBe(200);
-    expect(await jsonBody(res)).toMatchObject({
+    expect(await completedSync()).toMatchObject({
       nonprofitId: 1,
       matched: 2,
       skipped: 0,
@@ -1329,12 +1472,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     });
     gmailMessages = [makeGmailMessage("m1"), makeGmailMessage("m2")];
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(await jsonBody(res)).toMatchObject({
+    expect(await completedSync()).toMatchObject({
       matched: 2,
       skipped: 1,
       summarized: 1,
@@ -1348,19 +1486,11 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
     gmailMessages = [makeGmailMessage("m1")];
 
-    await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    await completedSync();
     expect(reportsStore).toHaveLength(1);
     expect(summarizeCalls).toHaveLength(1);
 
-    const second = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(await jsonBody(second)).toMatchObject({
+    expect(await completedSync()).toMatchObject({
       matched: 1,
       skipped: 1,
       summarized: 0,
@@ -1385,12 +1515,10 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     });
     gmailMessages = [makeGmailMessage("m1")];
 
-    const res = await crm.request("/nonprofits/2/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
+    expect(await completedSync(2)).toMatchObject({
+      skipped: 1,
+      summarized: 0,
     });
-
-    expect(await jsonBody(res)).toMatchObject({ skipped: 1, summarized: 0 });
     expect(summarizeCalls).toEqual([]);
   });
 
@@ -1400,12 +1528,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
       makeGmailMessage(`m${i}`),
     );
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(await jsonBody(res)).toMatchObject({
+    expect(await completedSync()).toMatchObject({
       matched: 12,
       summarized: 10,
       hasMore: true,
@@ -1413,74 +1536,46 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     expect(reportsStore).toHaveLength(10);
   });
 
-  it("stops at the wall-clock budget and reports hasMore", async () => {
-    // The failure this guards: a run long enough for the proxy in front of
-    // the app to give up, which surfaced in the browser as a CORS error
-    // while the server quietly finished the work anyway.
-    process.env.CRM_SYNC_BUDGET_MS = "1";
-    process.env.CRM_SYNC_THROTTLE_MS = "50";
+  it("resumes from where the message cap stopped the previous run", async () => {
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    gmailMessages = Array.from({ length: 12 }, (_, i) =>
+      makeGmailMessage(`m${i}`),
+    );
+
+    expect(await completedSync()).toMatchObject({ summarized: 10 });
+    // The stored ten are skipped; the remaining two are picked up.
+    expect(await completedSync()).toMatchObject({
+      skipped: 10,
+      summarized: 2,
+      hasMore: false,
+    });
+    expect(reportsStore).toHaveLength(12);
+    expect(new Set(reportsStore.map((r) => r.messageId)).size).toBe(12);
+  });
+
+  it("summarises the whole batch instead of cutting the run short on time", async () => {
+    // Regression guard for the removed wall-clock budget. The old shape
+    // stopped mid-batch to keep the response under a proxy timeout; nothing is
+    // waiting on the connection now, so a slow run must still finish the work.
+    process.env.CRM_SYNC_THROTTLE_MS = "40";
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
     gmailMessages = Array.from({ length: 5 }, (_, i) =>
       makeGmailMessage(`m${i}`),
     );
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    // One message always gets through, so every click makes progress.
-    expect(await jsonBody(res)).toMatchObject({
+    expect(await completedSync()).toMatchObject({
       matched: 5,
-      summarized: 1,
-      hasMore: true,
+      summarized: 5,
+      hasMore: false,
     });
-    expect(reportsStore).toHaveLength(1);
-    expect(summarizeCalls).toHaveLength(1);
-  });
-
-  it("resumes from where a budget-truncated run stopped", async () => {
-    process.env.CRM_SYNC_BUDGET_MS = "1";
-    // A non-zero throttle is what makes the cut deterministic: with no
-    // throttle the mocked Gemini returns fast enough that a second message
-    // can finish before 1ms of budget has elapsed.
-    process.env.CRM_SYNC_THROTTLE_MS = "50";
-    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-    gmailMessages = [
-      makeGmailMessage("m1"),
-      makeGmailMessage("m2"),
-      makeGmailMessage("m3"),
-    ];
-
-    const first = (await (
-      await crm.request("/nonprofits/1/sync", {
-        method: "POST",
-        headers: { Cookie: authCookie() },
-      })
-    ).json()) as { summarized: number; hasMore: boolean };
-    expect(first).toMatchObject({ summarized: 1, hasMore: true });
-
-    const second = (await (
-      await crm.request("/nonprofits/1/sync", {
-        method: "POST",
-        headers: { Cookie: authCookie() },
-      })
-    ).json()) as { skipped: number; summarized: number };
-    // The already-stored one is skipped; a different message is picked up.
-    expect(second).toMatchObject({ skipped: 1, summarized: 1 });
-    expect(reportsStore).toHaveLength(2);
-    expect(new Set(reportsStore.map((r) => r.messageId)).size).toBe(2);
+    expect(reportsStore).toHaveLength(5);
   });
 
   it("hasMore is false when the run drained everything unseen", async () => {
     nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
     gmailMessages = [makeGmailMessage("m1"), makeGmailMessage("m2")];
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-    expect(await jsonBody(res)).toMatchObject({
+    expect(await completedSync()).toMatchObject({
       summarized: 2,
       hasMore: false,
     });
@@ -1502,10 +1597,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     };
 
     const started = Date.now();
-    await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    await syncAndWait();
     const elapsed = Date.now() - started;
 
     expect(reportsStore).toHaveLength(3);
@@ -1523,12 +1615,8 @@ describe("POST /crm/nonprofits/:id/sync", () => {
         ? Promise.reject(new Error("Gemini exploded"))
         : Promise.resolve("ok summary");
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(await jsonBody(res)).toMatchObject({ summarized: 1, failed: 1 });
+    // A per-message failure is counted, not escalated: the run still "done".
+    expect(await completedSync()).toMatchObject({ summarized: 1, failed: 1 });
     expect(reportsStore.map((r) => r.messageId)).toEqual(["m2"]);
   });
 
@@ -1537,26 +1625,8 @@ describe("POST /crm/nonprofits/:id/sync", () => {
     gmailMessages = [makeGmailMessage("m1")];
     summarizeImpl = () => Promise.resolve("   ");
 
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(await jsonBody(res)).toMatchObject({ summarized: 0, failed: 1 });
+    expect(await completedSync()).toMatchObject({ summarized: 0, failed: 1 });
     expect(reportsStore).toHaveLength(0);
-  });
-
-  it("returns 502 when the Gmail search itself fails", async () => {
-    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-    gmailListError = new Error("Gmail 503");
-
-    const res = await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
-
-    expect(res.status).toBe(502);
-    expect(summarizeCalls).toEqual([]);
   });
 
   it("prefers internalDate over the free-form Date header", async () => {
@@ -1569,10 +1639,7 @@ describe("POST /crm/nonprofits/:id/sync", () => {
       }),
     ];
 
-    await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    await syncAndWait();
 
     expect(reportsStore[0]!.date.getTime()).toBe(internal);
   });
@@ -1586,23 +1653,119 @@ describe("POST /crm/nonprofits/:id/sync", () => {
       }),
     ];
 
-    await crm.request("/nonprofits/1/sync", {
-      method: "POST",
-      headers: { Cookie: authCookie() },
-    });
+    await syncAndWait();
 
     expect(reportsStore[0]!.date.toISOString()).toBe(
       "2026-03-14T09:30:00.000Z",
     );
   });
+});
 
-  it("rejects an out-of-range `days` window with 400", async () => {
-    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
-    const res = await crm.request("/nonprofits/1/sync?days=9999", {
-      method: "POST",
+describe("GET /crm/nonprofits/:id/sync-status", () => {
+  it("returns 401 without a session", async () => {
+    const res = await crm.request("/nonprofits/1/sync-status");
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a non-integer id with 400", async () => {
+    const res = await crm.request("/nonprofits/abc/sync-status", {
       headers: { Cookie: authCookie() },
     });
     expect(res.status).toBe(400);
+  });
+
+  it("reports `idle` when no run has happened in this process", async () => {
+    // Deliberately not a 404: "nothing has run" is a normal state for a panel
+    // opening for the first time, and after a restart it is also what a
+    // finished-but-forgotten run looks like.
+    const res = await crm.request("/nonprofits/1/sync-status", {
+      headers: { Cookie: authCookie() },
+    });
+    expect(res.status).toBe(200);
+    expect(await jsonBody(res)).toMatchObject({
+      nonprofitId: 1,
+      status: "idle",
+      startedAt: null,
+      finishedAt: null,
+      result: null,
+      error: null,
+    });
+  });
+
+  it("reports `running` while the job is in flight, then `done` with counts", async () => {
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+    gmailMessages = [makeGmailMessage("m1"), makeGmailMessage("m2")];
+    const gate = deferred();
+    summarizeImpl = async () => {
+      await gate.promise;
+      return "ok summary";
+    };
+
+    await startSync();
+
+    const during = (await (
+      await crm.request("/nonprofits/1/sync-status", {
+        headers: { Cookie: authCookie() },
+      })
+    ).json()) as { status: string; startedAt: string | null };
+    expect(during.status).toBe("running");
+    // Serialised explicitly — Hono's JSON encoder does not special-case Date.
+    expect(typeof during.startedAt).toBe("string");
+
+    gate.resolve();
+    await waitForSync();
+
+    const after = (await (
+      await crm.request("/nonprofits/1/sync-status", {
+        headers: { Cookie: authCookie() },
+      })
+    ).json()) as {
+      status: string;
+      finishedAt: string | null;
+      result: CrmSyncResult | null;
+    };
+    expect(after.status).toBe("done");
+    expect(typeof after.finishedAt).toBe("string");
+    expect(after.result).toMatchObject({
+      nonprofitId: 1,
+      matched: 2,
+      summarized: 2,
+      hasMore: false,
+    });
+  });
+
+  it("exposes a failed run with the status the inline route would have used", async () => {
+    gmailLabels = [{ id: "INBOX", name: "INBOX" }];
+    nonprofitsAll.mockImplementation(() => [syncableNonprofit()]);
+
+    await syncAndWait();
+
+    const res = await crm.request("/nonprofits/1/sync-status", {
+      headers: { Cookie: authCookie() },
+    });
+    expect(await jsonBody(res)).toMatchObject({
+      status: "error",
+      result: null,
+      error: { status: 422 },
+    });
+  });
+
+  it("keeps each nonprofit's job separate", async () => {
+    nonprofitsAll.mockImplementation(() => [
+      syncableNonprofit({ id: 1 }),
+      syncableNonprofit({ id: 2, name: "Second Trust" }),
+    ]);
+    gmailMessages = [makeGmailMessage("m1")];
+
+    await completedSync(1);
+
+    const other = await crm.request("/nonprofits/2/sync-status", {
+      headers: { Cookie: authCookie() },
+    });
+    expect(await jsonBody(other)).toMatchObject({
+      nonprofitId: 2,
+      status: "idle",
+    });
   });
 });
 
