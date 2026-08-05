@@ -1,5 +1,10 @@
-import { useState } from "react";
-import { useReports, useSyncCorrespondence } from "../hooks/useReports";
+import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  useReports,
+  useSyncCorrespondence,
+  useSyncStatus,
+} from "../hooks/useReports";
 import { ApiError } from "../lib/api";
 import type { Nonprofit, SyncCorrespondenceResult } from "../types";
 
@@ -43,18 +48,56 @@ export default function CorrespondencePanel({
 }) {
   const { data, isPending, isError, error } = useReports(nonprofit.id);
   const sync = useSyncCorrespondence();
+  const job = useSyncStatus(nonprofit.id);
+  const queryClient = useQueryClient();
 
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // Whether we should report the outcome of the run the server is tracking.
+  // Without this the panel would announce a stale result every time it
+  // re-opens, since the job survives on the server after it finishes.
+  const [watching, setWatching] = useState(false);
 
   const reports = data?.reports ?? [];
   const total = data?.total ?? 0;
+
+  const jobStatus = job.data?.status;
+  const running = jobStatus === "running";
+
+  // Adopt a run this component didn't start — a reload mid-sync, or a second
+  // tab — so the progress line and disabled button reflect reality.
+  useEffect(() => {
+    if (jobStatus === "running") setWatching(true);
+  }, [jobStatus]);
+
+  // Report the outcome once the run we're watching settles.
+  useEffect(() => {
+    if (!watching || !job.data) return;
+    if (job.data.status === "done" && job.data.result) {
+      setSyncResult(syncMessage(job.data.result));
+      setSyncError(null);
+      // The run wrote rows; the cached list predates them.
+      void queryClient.invalidateQueries({
+        queryKey: ["reports", nonprofit.id],
+      });
+      setWatching(false);
+    } else if (job.data.status === "error") {
+      setSyncError(
+        job.data.error?.message ?? "Could not refresh correspondence.",
+      );
+      setSyncResult(null);
+      setWatching(false);
+    }
+  }, [watching, job.data, queryClient, nonprofit.id]);
 
   const handleSync = async () => {
     setSyncResult(null);
     setSyncError(null);
     try {
-      setSyncResult(syncMessage(await sync.mutateAsync(nonprofit.id)));
+      await sync.mutateAsync(nonprofit.id);
+      setWatching(true);
+      // Don't wait up to a poll interval to show that it started.
+      void job.refetch();
     } catch (err) {
       // 422 is the "row can't support this" case — no contactEmail stored.
       // Surfacing the server's own message keeps the fix actionable instead
@@ -73,6 +116,8 @@ export default function CorrespondencePanel({
     }
   };
 
+  const busy = sync.isPending || running;
+
   return (
     <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-6 py-5">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -89,21 +134,22 @@ export default function CorrespondencePanel({
         <button
           type="button"
           onClick={() => void handleSync()}
-          disabled={sync.isPending}
+          disabled={busy}
           className="self-start sm:self-auto rounded-md border border-indigo-200 bg-white px-3 py-1.5 text-sm font-medium text-indigo-700 shadow-sm transition-colors duration-200 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {sync.isPending ? "Refreshing…" : "Refresh correspondence"}
+          {busy ? "Refreshing…" : "Refresh correspondence"}
         </button>
       </div>
 
-      {sync.isPending && (
+      {busy && (
         <p className="mt-3 text-sm text-slate-500" aria-live="polite">
-          Reading Gmail and summarising. This can take a minute — each message
-          is summarised individually.
+          Reading Gmail and summarising in the background. This can take a
+          minute — each message is summarised individually. You can leave this
+          page; the run keeps going.
         </p>
       )}
 
-      {syncResult && !sync.isPending && (
+      {syncResult && !busy && (
         <p
           className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
           aria-live="polite"
