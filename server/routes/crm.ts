@@ -9,14 +9,24 @@ import { requireSession } from "../lib/session";
 import { buildGmailQuery, extractBody, getHeader } from "../lib/gmail";
 import { summarizeText } from "../lib/gemini";
 import { sleep } from "../lib/utils";
+import {
+  beginCrmSync,
+  completeCrmSync,
+  failCrmSync,
+  getCrmSyncJob,
+  type CrmSyncError,
+  type CrmSyncResult,
+} from "../lib/crmSyncState";
 import { logger } from "../logger";
 
 // CRM (Foundation Management) routes.
 //
 // Surface:
 //   - `GET|POST /crm/nonprofits`, `PATCH|DELETE /crm/nonprofits/:id` — directory CRUD
-//   - `POST /crm/nonprofits/:id/sync`    — Gmail → Gemini → `reports` ingest
-//   - `GET  /crm/nonprofits/:id/reports` — recorded correspondence, newest first
+//   - `POST /crm/nonprofits/:id/sync`        — starts the Gmail → Gemini → `reports`
+//                                              ingest, returns 202 immediately
+//   - `GET  /crm/nonprofits/:id/sync-status` — progress/outcome of that run
+//   - `GET  /crm/nonprofits/:id/reports`     — recorded correspondence, newest first
 
 type GmailClient = ReturnType<typeof google.gmail>;
 
@@ -383,24 +393,32 @@ function geminiThrottleMs(): number {
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_GEMINI_THROTTLE_MS;
 }
 
-// Wall-clock ceiling on a single sync request.
-//
-// This exists because the route is driven by a button click travelling
-// through a proxy, and proxies give up. A run that summarised 10 messages at
-// the default throttle held the connection ~77s; the Codespaces port forwarder
-// killed it, the browser reported the resulting header-less error page as a
-// CORS failure, and — because the server carried on regardless — the rows
-// landed in the DB anyway. The work looked lost when it wasn't, which is the
-// worst version of this bug.
-//
-// Bounding the response is what makes that impossible. Hitting the budget is
-// not lossy: dedup means the next click resumes exactly where this one
-// stopped, and `hasMore` tells the UI to say so.
-const DEFAULT_SYNC_BUDGET_MS = 20_000;
+/**
+ * A run that failed as a whole, carrying the HTTP status the sync used to
+ * answer with inline. Individual message failures are *not* this — they are
+ * counted in `failed` and never abort the batch.
+ */
+class SyncFailure extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "SyncFailure";
+  }
+}
 
-function syncBudgetMs(): number {
-  const raw = Number(process.env.CRM_SYNC_BUDGET_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_SYNC_BUDGET_MS;
+/** Narrow an unknown thrown value to the shape stored on the job. */
+function toCrmSyncError(error: unknown): CrmSyncError {
+  if (error instanceof SyncFailure) {
+    return { message: error.message, status: error.status };
+  }
+  // Anything else is a bug rather than a known upstream condition, so keep the
+  // detail in the log and hand the client a generic message.
+  return {
+    message: "Correspondence sync failed unexpectedly.",
+    status: 500,
+  };
 }
 
 const syncQuerySchema = z.object({
@@ -522,11 +540,16 @@ async function resolveLabelId(
 }
 
 /**
- * POST /crm/nonprofits/:id/sync
+ * The correspondence sync itself, run in the background by
+ * `POST /crm/nonprofits/:id/sync`.
  *
  * Pulls recent mail *from* the nonprofit's `contactEmail` **within the
  * `Nonprofit` Gmail label**, summarises each previously-unseen message with
  * Gemini, and records it in `reports`.
+ *
+ * Throws `SyncFailure` when the run cannot proceed at all (bad credentials,
+ * missing label, Gmail unreachable). A single message that fails to summarise
+ * is counted in `failed` and never aborts the batch.
  *
  * Matching is on the exact `contactEmail` — these are organisational update
  * mails sent from a generic org address (`info@nonprofit.org`), so a domain
@@ -548,6 +571,223 @@ async function resolveLabelId(
  * look across the whole table rather than scoping to this nonprofit —
  * otherwise a message already attributed elsewhere would survive the filter,
  * burn a Gemini call, and then fail the insert.
+ */
+async function runCorrespondenceSync(
+  client: GmailClient,
+  id: number,
+  contactEmail: string,
+  days: number,
+): Promise<CrmSyncResult> {
+  const labelName = gmailLabel();
+
+  let labelId: string | null;
+  try {
+    labelId = await resolveLabelId(client, labelName);
+  } catch (error) {
+    logger.error(
+      { err: error, nonprofitId: id },
+      "Gmail label lookup failed during correspondence sync",
+    );
+    if (isGoogleAuthError(error)) {
+      throw new SyncFailure(
+        "Gmail authorisation has expired — sign in again.",
+        401,
+      );
+    }
+    throw new SyncFailure("Could not read Gmail labels", 502);
+  }
+
+  // Deliberately an error, not a fall-through to an unscoped search. With
+  // `labelIds` omitted Gmail happily searches the entire mailbox, so a
+  // typo'd or missing label would silently ingest every message that
+  // address ever sent — the exact behaviour the label is here to prevent.
+  if (!labelId) {
+    throw new SyncFailure(
+      `No Gmail label named "${labelName}" on this account. Create it (or set CRM_GMAIL_LABEL) and file grantee mail under it.`,
+      422,
+    );
+  }
+
+  const after = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  // Label goes through `labelIds` below, not the `label:` search operator —
+  // see resolveLabelId. `buildGmailQuery` is called without one, matching
+  // server/routes/gmail.ts.
+  const q = buildGmailQuery({
+    from: contactEmail,
+    after: gmailDateOperand(after),
+  });
+
+  let candidates: Array<{ id?: string | null }>;
+  try {
+    const search = await client.users.messages.list({
+      userId: "me",
+      q,
+      labelIds: [labelId],
+      maxResults: MAX_GMAIL_RESULTS,
+    });
+    candidates = search.data.messages ?? [];
+  } catch (error) {
+    logger.error(
+      { err: error, nonprofitId: id },
+      "Gmail search failed during correspondence sync",
+    );
+    if (isGoogleAuthError(error)) {
+      throw new SyncFailure(
+        "Gmail authorisation has expired — sign in again.",
+        401,
+      );
+    }
+    throw new SyncFailure("Could not search Gmail", 502);
+  }
+
+  const candidateIds = candidates
+    .map((m) => m.id)
+    .filter((mid): mid is string => Boolean(mid));
+
+  // Dedup pre-check. Empty `inArray` lists are invalid SQL in some
+  // dialects, so short-circuit rather than issuing the query.
+  let seen = new Set<string>();
+  if (candidateIds.length > 0) {
+    const stored = await db
+      .select({ messageId: reports.messageId })
+      .from(reports)
+      .where(inArray(reports.messageId, candidateIds))
+      .all();
+    seen = new Set(stored.map((r) => r.messageId));
+  }
+
+  const unseen = candidateIds.filter((mid) => !seen.has(mid));
+  const fresh = unseen.slice(0, MAX_MESSAGES_PER_SYNC);
+
+  let summarized = 0;
+  let failed = 0;
+  // Messages this run actually started. Equal to `fresh.length` now that
+  // nothing cuts the loop short, but kept distinct because it is what
+  // `hasMore` genuinely means: everything unseen we never got to.
+  let attempted = 0;
+
+  const startedAt = Date.now();
+  const throttleMs = geminiThrottleMs();
+  // Start of the previous Gemini call, so pacing measures call-to-call
+  // spacing rather than adding a fixed sleep on top of each call.
+  let lastCallStartedAt: number | null = null;
+
+  for (const messageId of fresh) {
+    // No wall-clock budget: nothing is waiting on this loop. The request
+    // that started it returned 202 long ago, so the run is free to take the
+    // full `MAX_MESSAGES_PER_SYNC × throttle` it needs.
+    if (attempted > 0 && lastCallStartedAt !== null) {
+      // Wait only for the remainder of the interval since the last call
+      // began, so Gemini's own latency counts toward the spacing instead of
+      // stacking on top of it.
+      const waitMs = Math.max(0, throttleMs - (Date.now() - lastCallStartedAt));
+      if (waitMs > 0) await sleep(waitMs);
+    }
+
+    attempted += 1;
+
+    try {
+      const full = await client.users.messages.get({
+        userId: "me",
+        id: messageId,
+        format: "full",
+      });
+
+      const payload = full.data.payload;
+      const headers = (payload?.headers ?? []).filter(
+        (h): h is { name: string; value: string } =>
+          typeof h.name === "string" && typeof h.value === "string",
+      );
+      const body = payload ? extractBody(payload) : "";
+      const content = (body || full.data.snippet || "").slice(
+        0,
+        MAX_BODY_CHARS,
+      );
+
+      lastCallStartedAt = Date.now();
+      const summary = (await summarizeText(content)).trim();
+      if (!summary) {
+        // `reports.summary` is NOT NULL and an empty summary is worse
+        // than no row — it looks like ingested-but-blank correspondence.
+        throw new Error("Gemini returned an empty summary");
+      }
+
+      await db
+        .insert(reports)
+        .values({
+          nonprofitId: id,
+          messageId,
+          summary,
+          date: messageDate(full.data.internalDate, getHeader(headers, "Date")),
+        })
+        .run();
+
+      summarized += 1;
+    } catch (error) {
+      // Per-message isolation, matching /summarize: one malformed message
+      // or one Gemini hiccup must not abandon the rest of the batch.
+      // Structured logging keeps the mail body out of a stringified error.
+      failed += 1;
+      logger.error(
+        { err: error, nonprofitId: id, messageId },
+        "Error summarizing correspondence",
+      );
+    }
+  }
+
+  // Anything unseen we never started — the count cap is the only thing that
+  // stops us now — is still waiting for the next click.
+  const hasMore = unseen.length > attempted;
+  const elapsedMs = Date.now() - startedAt;
+
+  logger.info({
+    method: "POST",
+    path: "/crm/nonprofits/:id/sync",
+    nonprofitId: id,
+    matched: candidateIds.length,
+    skipped: candidateIds.length - unseen.length,
+    attempted,
+    summarized,
+    failed,
+    hasMore,
+    elapsedMs,
+  });
+
+  return {
+    nonprofitId: id,
+    matched: candidateIds.length,
+    // Messages that were already on file, so never sent to Gemini.
+    skipped: candidateIds.length - unseen.length,
+    summarized,
+    failed,
+    // Tells the UI another click will fetch more.
+    hasMore,
+  };
+}
+
+/**
+ * POST /crm/nonprofits/:id/sync
+ *
+ * Starts a correspondence sync and returns **202 Accepted immediately**. The
+ * run itself continues in the background; the client polls
+ * `GET /crm/nonprofits/:id/sync-status` for progress and the final counts.
+ *
+ * Why 202 rather than the result
+ * ------------------------------
+ * Summarising N messages costs `N × throttle` seconds, which is longer than a
+ * proxy will hold a connection open with no bytes flowing. Answering inline
+ * meant the Codespaces port forwarder killed the request mid-run; its
+ * header-less error response reads to the browser as a CORS failure, even
+ * though the server went on to finish and commit every row. Returning at once
+ * is what makes the request duration independent of the work. See
+ * server/lib/crmSyncState.ts.
+ *
+ * What is still answered inline: everything that can be decided from the
+ * database in microseconds — a malformed id (400), an unknown nonprofit (404),
+ * and a row with no usable `contactEmail` (422). Those stay immediate so the
+ * user gets an actionable message without a polling round-trip. Failures that
+ * need Gmail — expired credentials, a missing label, an unreachable API —
+ * surface through the job's `error` instead, carrying the same status codes.
  */
 crm.post(
   "/nonprofits/:id/sync",
@@ -590,208 +830,82 @@ crm.post(
       );
     }
 
-    const client = c.get("gmailClient");
-    const labelName = gmailLabel();
-
-    let labelId: string | null;
-    try {
-      labelId = await resolveLabelId(client, labelName);
-    } catch (error) {
-      logger.error(
-        { err: error, nonprofitId: id, path: c.req.path },
-        "Gmail label lookup failed during correspondence sync",
-      );
-      if (isGoogleAuthError(error)) {
-        return c.json(
-          { message: "Gmail authorisation has expired — sign in again." },
-          401,
-        );
-      }
-      return c.json({ message: "Could not read Gmail labels" }, 502);
-    }
-
-    // Deliberately an error, not a fall-through to an unscoped search. With
-    // `labelIds` omitted Gmail happily searches the entire mailbox, so a
-    // typo'd or missing label would silently ingest every message that
-    // address ever sent — the exact behaviour the label is here to prevent.
-    if (!labelId) {
+    // Already running: report the live job rather than starting a second
+    // Gemini loop over the same mailbox. Still a 202 — from the client's point
+    // of view "your sync is running" is true either way.
+    if (!beginCrmSync(id)) {
       return c.json(
-        {
-          message: `No Gmail label named "${labelName}" on this account. Create it (or set CRM_GMAIL_LABEL) and file grantee mail under it.`,
-        },
-        422,
+        { nonprofitId: id, status: "running" as const, alreadyRunning: true },
+        202,
       );
     }
 
-    const after = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    // Label goes through `labelIds` below, not the `label:` search operator —
-    // see resolveLabelId. `buildGmailQuery` is called without one, matching
-    // server/routes/gmail.ts.
-    const q = buildGmailQuery({
-      from: nonprofit.contactEmail,
-      after: gmailDateOperand(after),
-    });
+    // The Gmail client outlives this request, which is safe: `requireSession`
+    // builds a standalone OAuth2 client per request and nothing about it is
+    // tied to the response lifecycle. Its "tokens" listener writes refreshed
+    // credentials straight back to the session store, so a refresh landing
+    // mid-run is still persisted.
+    const client = c.get("gmailClient");
+    const contactEmail = nonprofit.contactEmail;
 
-    let candidates: Array<{ id?: string | null }>;
-    try {
-      const search = await client.users.messages.list({
-        userId: "me",
-        q,
-        labelIds: [labelId],
-        maxResults: MAX_GMAIL_RESULTS,
-      });
-      candidates = search.data.messages ?? [];
-    } catch (error) {
-      logger.error(
-        { err: error, nonprofitId: id, path: c.req.path },
-        "Gmail search failed during correspondence sync",
-      );
-      if (isGoogleAuthError(error)) {
-        return c.json(
-          { message: "Gmail authorisation has expired — sign in again." },
-          401,
-        );
-      }
-      return c.json({ message: "Could not search Gmail" }, 502);
-    }
-
-    const candidateIds = candidates
-      .map((m) => m.id)
-      .filter((mid): mid is string => Boolean(mid));
-
-    // Dedup pre-check. Empty `inArray` lists are invalid SQL in some
-    // dialects, so short-circuit rather than issuing the query.
-    let seen = new Set<string>();
-    if (candidateIds.length > 0) {
-      const stored = await db
-        .select({ messageId: reports.messageId })
-        .from(reports)
-        .where(inArray(reports.messageId, candidateIds))
-        .all();
-      seen = new Set(stored.map((r) => r.messageId));
-    }
-
-    const unseen = candidateIds.filter((mid) => !seen.has(mid));
-    const fresh = unseen.slice(0, MAX_MESSAGES_PER_SYNC);
-
-    let summarized = 0;
-    let failed = 0;
-    // Messages this run actually started. Drives `hasMore`, which must
-    // reflect where we stopped — whether that was the count cap or the time
-    // budget — not just the cap.
-    let attempted = 0;
-
-    const startedAt = Date.now();
-    const budgetMs = syncBudgetMs();
-    const throttleMs = geminiThrottleMs();
-    // Start of the previous Gemini call, so pacing measures call-to-call
-    // spacing rather than adding a fixed sleep on top of each call.
-    let lastCallStartedAt: number | null = null;
-
-    for (const messageId of fresh) {
-      // Always let the first message through, so every click makes progress
-      // even if the budget is set absurdly low.
-      if (attempted > 0) {
-        if (Date.now() - startedAt >= budgetMs) break;
-
-        // Wait only for the remainder of the interval since the last call
-        // began. Bail out instead of sleeping if that would overrun the
-        // budget — returning a short, honest result beats blowing the
-        // deadline to squeeze in one more summary.
-        const waitMs =
-          lastCallStartedAt === null
-            ? 0
-            : Math.max(0, throttleMs - (Date.now() - lastCallStartedAt));
-        if (waitMs > 0) {
-          if (Date.now() - startedAt + waitMs >= budgetMs) break;
-          await sleep(waitMs);
-        }
-      }
-
-      attempted += 1;
-
-      try {
-        const full = await client.users.messages.get({
-          userId: "me",
-          id: messageId,
-          format: "full",
-        });
-
-        const payload = full.data.payload;
-        const headers = (payload?.headers ?? []).filter(
-          (h): h is { name: string; value: string } =>
-            typeof h.name === "string" && typeof h.value === "string",
-        );
-        const body = payload ? extractBody(payload) : "";
-        const content = (body || full.data.snippet || "").slice(
-          0,
-          MAX_BODY_CHARS,
-        );
-
-        lastCallStartedAt = Date.now();
-        const summary = (await summarizeText(content)).trim();
-        if (!summary) {
-          // `reports.summary` is NOT NULL and an empty summary is worse
-          // than no row — it looks like ingested-but-blank correspondence.
-          throw new Error("Gemini returned an empty summary");
-        }
-
-        await db
-          .insert(reports)
-          .values({
-            nonprofitId: id,
-            messageId,
-            summary,
-            date: messageDate(
-              full.data.internalDate,
-              getHeader(headers, "Date"),
-            ),
-          })
-          .run();
-
-        summarized += 1;
-      } catch (error) {
-        // Per-message isolation, matching /summarize: one malformed message
-        // or one Gemini hiccup must not abandon the rest of the batch.
-        // Structured logging keeps the mail body out of a stringified error.
-        failed += 1;
+    // Deliberately not awaited — returning before this settles is the point.
+    void runCorrespondenceSync(client, id, contactEmail, days)
+      .then((result) => completeCrmSync(id, result))
+      .catch((error: unknown) => {
         logger.error(
-          { err: error, nonprofitId: id, messageId, path: c.req.path },
-          "Error summarizing correspondence",
+          { err: error, nonprofitId: id },
+          "Correspondence sync run failed",
         );
-      }
-    }
+        failCrmSync(id, toCrmSyncError(error));
+      });
 
-    // Anything unseen we never started — whether the count cap or the time
-    // budget stopped us — is still waiting for the next click.
-    const hasMore = unseen.length > attempted;
-    const elapsedMs = Date.now() - startedAt;
-
-    logger.info({
-      method: "POST",
-      path: "/crm/nonprofits/:id/sync",
-      nonprofitId: id,
-      matched: candidateIds.length,
-      skipped: candidateIds.length - unseen.length,
-      attempted,
-      summarized,
-      failed,
-      hasMore,
-      elapsedMs,
-    });
-
-    return c.json({
-      nonprofitId: id,
-      matched: candidateIds.length,
-      // Messages that were already on file, so never sent to Gemini.
-      skipped: candidateIds.length - unseen.length,
-      summarized,
-      failed,
-      // Tells the UI another click will fetch more.
-      hasMore,
-    });
+    return c.json(
+      { nonprofitId: id, status: "running" as const, alreadyRunning: false },
+      202,
+    );
   },
 );
+
+/**
+ * GET /crm/nonprofits/:id/sync-status
+ *
+ * Progress and outcome of the most recent sync for this nonprofit. `idle`
+ * means none has run in this process — including after a restart, which
+ * forgets in-flight jobs. That is cosmetic: whatever the lost run committed is
+ * already in `reports` and visible through `GET .../reports`.
+ *
+ * Deliberately cheap and unconditional (no DB read): the client polls this
+ * every couple of seconds while a run is in flight.
+ */
+crm.get("/nonprofits/:id/sync-status", (c) => {
+  const id = parseNonprofitId(c.req.param("id"));
+  if (id === null) {
+    return c.json({ message: "Invalid id parameter" }, 400);
+  }
+
+  const job = getCrmSyncJob(id);
+  if (!job) {
+    return c.json({
+      nonprofitId: id,
+      status: "idle" as const,
+      startedAt: null,
+      finishedAt: null,
+      result: null,
+      error: null,
+    });
+  }
+
+  // Serialise the timestamps explicitly — Hono's JSON encoder does not
+  // special-case Date, the same trap `GET .../reports` handles below.
+  return c.json({
+    nonprofitId: job.nonprofitId,
+    status: job.status,
+    startedAt: job.startedAt.toISOString(),
+    finishedAt: job.finishedAt ? job.finishedAt.toISOString() : null,
+    result: job.result,
+    error: job.error,
+  });
+});
 
 /**
  * GET /crm/nonprofits/:id/reports
