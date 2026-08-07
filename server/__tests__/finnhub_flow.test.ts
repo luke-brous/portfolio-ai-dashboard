@@ -36,7 +36,7 @@ const DEFAULT_NEWS = [
 const allFromInvestments = mock(
   () => [] as Array<{ id: number; ticker: string }>,
 );
-const allFromPriceSnapshots = mock(() => [] as Array<{ id: number }>);
+const allFromPriceSnapshots = mock(() => [] as Array<{ timestamp: Date }>);
 const insertValues = mock(async () => [{ id: 1 }]);
 const runSql = mock(async () => {});
 const getQuoteMock = mock(
