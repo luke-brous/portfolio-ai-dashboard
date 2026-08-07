@@ -136,14 +136,18 @@ local `.env` and invoke it however you prefer.
 ## Background sync
 
 `server/index.ts` schedules `syncMarketData()` (defined in
-`server/db/syncMarketData.ts`) on boot and every 24 hours. The job:
+`server/db/syncMarketData.ts`) on boot and hourly. The job:
 
 - Fetches today's quote for every ticker in `investments`.
 - Pulls the last 7 days of company news for each ticker.
-- Uses a same-day guard to skip tickers with a snapshot dated today
-  (so reboots are cheap).
+- Uses a session-aware guard: refreshes a ticker at most hourly while the
+  market is open (09:30–16:00 ET), takes one more pass after 16:00 to capture
+  the closing price, then stays quiet overnight and at weekends (so reboots
+  and off-hours ticks are cheap).
 - Throttles to ~30 req/min — comfortably below Finnhub's free-tier
   60 req/min ceiling.
+- Appends each outcome to the `sync_runs` table, so the dashboard's
+  sync badge survives a restart instead of resetting to "Never synced".
 - Records run results in `server/lib/syncState.ts` (`{ at, ok, note }`).
 
 Inspect the current run state via:
