@@ -36,7 +36,7 @@ const DEFAULT_NEWS = [
 const allFromInvestments = mock(
   () => [] as Array<{ id: number; ticker: string }>,
 );
-const allFromPriceSnapshots = mock(() => [] as Array<{ id: number }>);
+const allFromPriceSnapshots = mock(() => [] as Array<{ timestamp: Date }>);
 const insertValues = mock(async () => [{ id: 1 }]);
 const runSql = mock(async () => {});
 const getQuoteMock = mock(
@@ -68,9 +68,13 @@ const dbMockFactory = () => ({
     select: mock(() => ({
       from: mock((table: unknown) => {
         if (table === investments) return { all: allFromInvestments };
+        // The snapshot guard reads the newest row per ticker:
+        // .where(...).orderBy(desc(timestamp)).limit(1).all()
         return {
           where: mock(() => ({
-            limit: mock(() => ({ all: allFromPriceSnapshots })),
+            orderBy: mock(() => ({
+              limit: mock(() => ({ all: allFromPriceSnapshots })),
+            })),
           })),
         };
       }),
@@ -150,21 +154,54 @@ describe("Finnhub Integration Flow", () => {
       expect(getCompanyNewsMock).not.toHaveBeenCalled();
     });
 
-    it("skips a ticker whose snapshot already exists today, without calling Finnhub", async () => {
+    it("skips a ticker snapshotted moments ago, without calling Finnhub", async () => {
       allFromInvestments.mockImplementation(() => [{ id: 1, ticker: "AAPL" }]);
-      allFromPriceSnapshots.mockImplementation(() => [{ id: 99 }]);
+      // A snapshot timestamped *now* is skipped in either session state: with
+      // the market open it is inside the hourly window, and with it closed we
+      // already hold data newer than the last close. That keeps this test
+      // independent of when in the week CI happens to run.
+      allFromPriceSnapshots.mockImplementation(() => [
+        { timestamp: new Date() },
+      ]);
 
       const result = await syncMarketData();
 
-      // Contract: same-day-skip MUST NOT call Finnhub and MUST NOT insert
-      // a fresh snapshot. The implementation also bumps `tickersProcessed`
-      // inside the skip branch, which is an opaque implementation detail
-      // — so we assert the contract, not the counter value.
+      // Contract: a skip MUST NOT call Finnhub and MUST NOT insert a fresh
+      // snapshot. The implementation also bumps `tickersProcessed` inside the
+      // skip branch, which is an opaque implementation detail — so we assert
+      // the contract, not the counter value.
       expect(result.tickersSkipped).toBe(1);
       expect(result.tickersFailed).toBe(0);
       expect(getQuoteMock).not.toHaveBeenCalled();
       expect(getCompanyNewsMock).not.toHaveBeenCalled();
       expect(insertValues).not.toHaveBeenCalled();
+    });
+
+    it("syncs a ticker whose newest snapshot predates the last market close", async () => {
+      allFromInvestments.mockImplementation(() => [{ id: 1, ticker: "AAPL" }]);
+      // 30 days stale — older than any plausible last close, so this must
+      // sync whatever the current session state is.
+      allFromPriceSnapshots.mockImplementation(() => [
+        { timestamp: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+      ]);
+
+      const result = await syncMarketData();
+
+      expect(result.tickersSkipped).toBe(0);
+      expect(result.tickersFailed).toBe(0);
+      expect(getQuoteMock).toHaveBeenCalled();
+      expect(insertValues).toHaveBeenCalled();
+    });
+
+    it("syncs a ticker that has never been snapshotted", async () => {
+      allFromInvestments.mockImplementation(() => [{ id: 1, ticker: "AAPL" }]);
+      allFromPriceSnapshots.mockImplementation(() => []);
+
+      const result = await syncMarketData();
+
+      expect(result.tickersSkipped).toBe(0);
+      expect(getQuoteMock).toHaveBeenCalled();
+      expect(insertValues).toHaveBeenCalled();
     });
 
     it("rejects a quote where `c` is 0 and counts the ticker as failed", async () => {

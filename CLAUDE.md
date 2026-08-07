@@ -66,9 +66,10 @@ Four core tables drive the app:
 
 ### Scheduled Sync (server/db/syncMarketData.ts, wired in server/index.ts)
 
-- **Frequency:** Runs on boot, then every 24 hours via `setInterval(..., 24h).unref()`
+- **Frequency:** Runs on boot, then hourly via `setInterval(..., 1h).unref()`. Kept deliberately in step with `STALE_AFTER_MINUTES` (60) in `server/routes/portfolio.ts` — the dashboard badge's "fresh" threshold only carries signal if the sync actually runs that often. Change one and you must change the other.
+- **Last-run persistence:** Outcomes are appended to the `sync_runs` table (`server/db/syncRuns.ts`) as well as cached in memory, so `/portfolio/sync-status` still reports the real last-sync time after a restart. Reads prefer the in-memory value and fall back to the newest row.
 - **What it does:** For each ticker, calls Finnhub `/quote` and last 7 days of `/company-news`, throttled at 2s (60 req/min free tier ceiling)
-- **Idempotency:** Same-day snapshots skipped; news inserts via `INSERT OR IGNORE` on the composite unique index
+- **Idempotency:** Snapshot cadence is session-aware (`server/lib/marketHours.ts`) — at most one snapshot per ticker per hour while the market is open (09:30–16:00 ET), one further pass to capture the closing print, then nothing until the next session. Outside market hours every ticker short-circuits on one indexed read, so hourly ticks around the clock cost no Finnhub calls. News inserts via `INSERT OR IGNORE` on the composite unique index
 - **Guard:** In-flight Promise prevents overlapping runs (server/lib/syncState.ts)
 - **Control:** Set `FINNHUB_SYNC_ENABLED=0` to disable (tests, CI)
 
@@ -173,11 +174,14 @@ client/
 - Step 5 (filings + financials) will double this to 4 calls — current 2s sleep becomes uncomfortable on noisy networks
 - **Action:** When filing detection lands, switch Finnhub client to token-bucket or 429-aware retry logic
 
-### 4. Same-Day Snapshot Skip
+### 4. Session-Aware Snapshot Skip
 
-- `syncMarketData.ts` skips re-pulling if a snapshot already exists for today
-- **Risk:** A future refactor might re-add `await sleep()` to the skip branch, doubling sync time
-- **Protection:** Step 5.3 of REWORK.md requires test coverage for this branch
+- `syncMarketData.ts` delegates the decision to `shouldSyncTicker()` in `server/lib/marketHours.ts`. The rules, in order: never synced → sync; newest snapshot predates the last close → sync (this is what captures the closing print and what catches up after downtime); market closed and we hold that close → skip; market open → refresh at most hourly.
+- **Why not same-day:** the old guard wrote one row per ticker per day, so `lastDataAt` advanced only once daily and the sync badge could never be meaningfully "fresh". It also meant intraday price moves were invisible.
+- **Risk:** A future refactor might re-add `await sleep()` to the skip branch, doubling sync time. Off-hours ticks now hit that branch for every ticker, so this would be far more expensive than before.
+- **Timezone:** all session logic runs in `America/New_York` via `Intl`, never server-local time — a Codespace runs UTC and would otherwise be 4–5 hours out. Both DST regimes are covered in `server/lib/__tests__/marketHours.test.ts`.
+- **Known gap:** market holidays are not modelled; only weekends. On a holiday the sync runs and stores a repeat of the prior close.
+- **Coupled invariant:** hourly snapshots mean "previous snapshot" is no longer "yesterday". `GET /portfolio/investments` collapses to one row per (investment, day) before ranking, so `delta` stays day-over-day. Do not simplify that CTE back to a bare `ROW_NUMBER() ... LIMIT 2`.
 
 ### 5. News Dedup via Composite Index
 
@@ -209,7 +213,8 @@ client/
 - `server/lib/syncState.ts` — in-flight guard, run recording, snapshot consistency
 - `server/lib/finnhub.ts` — Finnhub client with mocked `fetch` via `__setFetchForTests` indirection
 - `server/routes/*.ts` — Zod validation, OAuth middleware, mocked Gemini/Finnhub responses
-- `server/db/syncMarketData.ts` — same-day skip, all-zero quote rejection, news idempotency, in-flight guard
+- `server/db/syncMarketData.ts` — session-aware skip, all-zero quote rejection, news idempotency, in-flight guard
+- `server/lib/marketHours.ts` — session boundaries across both DST regimes, weekend handling, staleness thresholds, `shouldSyncTicker` policy
 - `server/__tests__/finnhub_flow.test.ts` — end-to-end Finnhub pull → DB insert
 
 **`bun run test` runs TWO `bun test` processes — don't collapse it back to one.**

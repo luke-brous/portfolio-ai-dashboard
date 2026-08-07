@@ -54,6 +54,23 @@ export const priceSnapshots = sqliteTable("price_snapshots", {
   timestamp: integer("timestamp", { mode: "timestamp" }).notNull(),
 });
 
+// Durable record of every scheduled Finnhub sync tick.
+//
+// The in-memory `lastSyncRun` in server/lib/syncState.ts is dropped by any
+// restart — deploy, crash, `bun --watch` picking up a save — which is what
+// made the dashboard badge fall back to "Not synced yet" while the data in
+// price_snapshots was in fact minutes old. Persisting the outcome here lets
+// GET /portfolio/sync-status answer honestly across a restart.
+export const syncRuns = sqliteTable("sync_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  at: integer("at", { mode: "timestamp" }).notNull(),
+  ok: integer("ok", { mode: "boolean" }).notNull(),
+  note: text("note").notNull(),
+  tickersProcessed: integer("tickers_processed").notNull().default(0),
+  tickersSkipped: integer("tickers_skipped").notNull().default(0),
+  tickersFailed: integer("tickers_failed").notNull().default(0),
+});
+
 export const newsItems = sqliteTable(
   "news_items",
   {
