@@ -65,7 +65,7 @@ app.route("/crm", crm);
 
 // ---------------------------------------------------------------------------
 // Scheduled Finnhub sync.
-// Catches up on boot, then re-runs every 24 hours. An in-flight flag
+// Catches up on boot, then re-runs hourly. An in-flight flag
 // (managed in server/lib/syncState.ts) prevents overlapping tickers.
 // Set FINNHUB_SYNC_ENABLED=0 to disable (useful for tests/CI).
 // ---------------------------------------------------------------------------
@@ -84,7 +84,14 @@ async function safeRunSync(): Promise<void> {
       tickersFailed === 0
         ? `${tickersProcessed} ticker(s) ok${skipSuffix}`
         : `${tickersFailed} of ${tickersProcessed} ticker(s) failed${skipSuffix}`;
-    recordSyncRun({ at: new Date(), ok: tickersFailed === 0, note });
+    recordSyncRun({
+      at: new Date(),
+      ok: tickersFailed === 0,
+      note,
+      tickersProcessed,
+      tickersSkipped,
+      tickersFailed,
+    });
     logger.info(
       `[sync] Completed at ${getLastRun()!.at.toISOString()} — ${note}`,
     );
@@ -104,13 +111,21 @@ if (process.env.FINNHUB_SYNC_ENABLED !== "0") {
   // (including the circular one between this file and db/syncMarketData.ts)
   // have fully resolved before we touch `db` or the table bindings.
   setTimeout(() => void safeRunSync(), 0);
-  // Then every 24 hours. `unref()` keeps the timer from holding the event
-  // loop open past test / CLI runs.
-  const SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  // Then hourly. `unref()` keeps the timer from holding the event loop open
+  // past test / CLI runs.
+  //
+  // This is deliberately aligned with STALE_AFTER_MINUTES in
+  // server/routes/portfolio.ts: a 1-hour "fresh" threshold on the dashboard
+  // badge only carries signal if the sync actually runs hourly — on the old
+  // 24h interval the badge would read red for ~23 hours a day. Cost is well
+  // inside Finnhub's free tier (45 tickers x 2 calls x 24 runs/day against a
+  // 60 req/min ceiling), and syncMarketData skips tickers that already have a
+  // snapshot for today, so most of those runs do almost no work.
+  const SYNC_INTERVAL_MS = 60 * 60 * 1000;
   const handle = setInterval(() => void safeRunSync(), SYNC_INTERVAL_MS);
   if (typeof handle.unref === "function") handle.unref();
   logger.info(
-    "[sync] Finnhub sync scheduled (boot + every 24h). Set FINNHUB_SYNC_ENABLED=0 to disable.",
+    "[sync] Finnhub sync scheduled (boot + hourly). Set FINNHUB_SYNC_ENABLED=0 to disable.",
   );
 }
 
