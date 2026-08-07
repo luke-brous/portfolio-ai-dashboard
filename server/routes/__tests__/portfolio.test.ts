@@ -6,10 +6,15 @@ import * as drizzleOrm from "drizzle-orm";
 import portfolio from "../portfolio";
 import { investments, priceSnapshots, newsItems } from "../../db/schema";
 import {
+  __setSyncRunStoreForTests,
   recordSyncFinish,
   recordSyncRun,
   recordSyncStart,
+  resetSyncStateForTesting,
+  type SyncRun,
+  type SyncRunStore,
 } from "../../lib/syncState";
+import { isMarketOpen, staleAfterMinutes } from "../../lib/marketHours";
 import { createSession } from "../../lib/session";
 import type { SessionData } from "../../types/session";
 
@@ -649,10 +654,48 @@ describe("GET /portfolio/sync-status", () => {
   // Each test self-seeds state: syncState module-level locals are shared
   // across the test process, so we avoid asserting on initial absence.
 
+  type SyncStatusBody = {
+    lastRun: { at: string; ok: boolean; note: string } | null;
+    lastDataAt: string | null;
+    inFlight: boolean;
+    marketOpen: boolean;
+    staleAfterMinutes: number;
+  };
+
+  // syncState now persists runs. Install an in-memory store rather than
+  // letting it reach the mocked `db` — the db mock is shaped around the
+  // investments/snapshots/news queries and would throw on sync_runs, which
+  // syncState swallows, silently turning these into assertions about an
+  // error path instead of the feature.
+  let persisted: SyncRun[];
+  let lastDataAt: Date | null;
+
+  beforeEach(() => {
+    persisted = [];
+    lastDataAt = null;
+    const store: SyncRunStore = {
+      insertSyncRun: (run) => {
+        persisted.push(run);
+      },
+      selectLatestSyncRun: () =>
+        persisted.length === 0
+          ? null
+          : persisted.reduce((newest, r) =>
+              r.at.getTime() >= newest.at.getTime() ? r : newest,
+            ),
+      selectLastDataAt: () => lastDataAt,
+    };
+    __setSyncRunStoreForTests(store);
+  });
+
+  afterAll(() => {
+    __setSyncRunStoreForTests(null);
+  });
+
   it("reflects an in-flight run (inFlight: true)", async () => {
     recordSyncStart();
     const res = await authedRequest("/sync-status");
-    const body = (await res.json()) as { inFlight: boolean };
+    const body = (await res.json()) as SyncStatusBody;
     expect(body.inFlight).toBe(true);
     recordSyncFinish(); // tidy for the next test
   });
@@ -666,10 +709,7 @@ describe("GET /portfolio/sync-status", () => {
     recordSyncRun(outcome);
     recordSyncFinish();
     const res = await authedRequest("/sync-status");
-    const body = (await res.json()) as {
-      lastRun: { at: string; ok: boolean; note: string } | null;
-      inFlight: boolean;
-    };
+    const body = (await res.json()) as SyncStatusBody;
     expect(body.inFlight).toBe(false);
     expect(body.lastRun).toEqual({
       at: "2026-07-02T00:00:00.000Z",
@@ -687,13 +727,92 @@ describe("GET /portfolio/sync-status", () => {
     recordSyncRun(outcome);
     recordSyncFinish();
     const res = await authedRequest("/sync-status");
-    const body = (await res.json()) as {
-      lastRun: { at: string; ok: boolean; note: string } | null;
-      inFlight: boolean;
-    };
+    const body = (await res.json()) as SyncStatusBody;
     expect(body.inFlight).toBe(false);
     expect(body.lastRun?.ok).toBe(false);
     expect(body.lastRun?.note).toBe("simulated sync explosion");
+  });
+
+  it("serialises lastDataAt as an ISO string", async () => {
+    recordSyncRun({
+      at: new Date("2026-07-02T00:00:00.000Z"),
+      ok: true,
+      note: "5 ticker(s) ok",
+    });
+    recordSyncFinish();
+    lastDataAt = new Date("2026-07-01T23:58:00.000Z");
+
+    const res = await authedRequest("/sync-status");
+    const body = (await res.json()) as SyncStatusBody;
+    expect(body.lastDataAt).toBe("2026-07-01T23:58:00.000Z");
+  });
+
+  it("returns lastDataAt: null when no snapshot exists", async () => {
+    recordSyncRun({
+      at: new Date("2026-07-02T00:00:00.000Z"),
+      ok: true,
+      note: "0 ticker(s) ok",
+    });
+    recordSyncFinish();
+
+    const res = await authedRequest("/sync-status");
+    const body = (await res.json()) as SyncStatusBody;
+    expect(body.lastDataAt).toBeNull();
+  });
+
+  it("sends the staleness threshold so the client does not hardcode it", async () => {
+    const res = await authedRequest("/sync-status");
+    const body = (await res.json()) as SyncStatusBody;
+
+    // The threshold is derived from the market session, so its exact value
+    // depends on when the suite runs. Pin the contract instead: a positive
+    // number, at least the in-session grace period, and never so large that
+    // the badge could not go red at all.
+    expect(typeof body.staleAfterMinutes).toBe("number");
+    expect(body.staleAfterMinutes).toBeGreaterThanOrEqual(90);
+    expect(body.staleAfterMinutes).toBeLessThan(5 * 24 * 60);
+  });
+
+  it("reports whether the market is currently open", async () => {
+    const res = await authedRequest("/sync-status");
+    const body = (await res.json()) as SyncStatusBody;
+    expect(typeof body.marketOpen).toBe("boolean");
+    // Cross-check against the same helper the route uses, so this fails if
+    // the field is ever wired to the wrong source.
+    expect(body.marketOpen).toBe(isMarketOpen(new Date()));
+  });
+
+  it("allows more staleness when the market is closed than when it is open", async () => {
+    // In-session the allowance is the flat grace period; out of session it
+    // grows with time since the last close. Asserting the relationship keeps
+    // this meaningful without pinning a wall-clock value.
+    const openThreshold = staleAfterMinutes(new Date("2026-08-05T16:00:00Z")); // Wed 12:00 ET
+    const closedThreshold = staleAfterMinutes(
+      new Date("2026-08-09T16:00:00Z"), // Sun 12:00 ET
+    );
+    expect(openThreshold).toBe(90);
+    expect(closedThreshold).toBeGreaterThan(openThreshold);
+  });
+
+  it("still reports lastRun after the in-memory cache is dropped (restart)", async () => {
+    recordSyncRun({
+      at: new Date("2026-07-02T00:00:00.000Z"),
+      ok: true,
+      note: "survives a restart",
+    });
+    recordSyncFinish();
+
+    // This is the bug the persisted table exists to fix: before it, a reload
+    // reset lastRun to null and the badge fell back to "Not synced yet".
+    resetSyncStateForTesting();
+
+    const res = await authedRequest("/sync-status");
+    const body = (await res.json()) as SyncStatusBody;
+    expect(body.lastRun).toEqual({
+      at: "2026-07-02T00:00:00.000Z",
+      ok: true,
+      note: "survives a restart",
+    });
   });
 });
 

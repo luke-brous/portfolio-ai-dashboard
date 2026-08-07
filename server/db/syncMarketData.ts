@@ -1,16 +1,25 @@
 import "dotenv/config";
-import { sql, and, eq, gte } from "drizzle-orm";
+import { sql, desc, eq } from "drizzle-orm";
 import { db } from "..";
 import { investments, priceSnapshots } from "./schema";
 import { getQuote, getCompanyNews } from "../lib/finnhub";
+import { isMarketOpen, shouldSyncTicker } from "../lib/marketHours";
 import { sleep } from "../lib/utils";
 import type { FinnhubNewsItem } from "../types/finnhub";
 
 //
 //  Scheduled Finnhub sync.
 //
-// Pulls today's price snapshot and the last 7 days of company news for every
-// ticker in the `investments` table. Inserts into `news_items` are
+// Pulls a price snapshot and the last 7 days of company news for every ticker
+// in the `investments` table.
+//
+// Snapshot cadence is session-aware (see server/lib/marketHours.ts): at most
+// hourly per ticker while the market is open, one more pass to capture the
+// closing print, then nothing until the next session. Callers may therefore
+// tick this hourly around the clock — outside market hours every ticker
+// short-circuits on a single indexed DB read and no Finnhub call is made.
+//
+// Inserts into `news_items` are
 // idempotent on the composite `(finnhub_id, investment_id)` unique index in
 // `schema.ts`, so repeated runs are safe across all 45 held tickers.
 //
@@ -43,10 +52,12 @@ export async function syncMarketData(): Promise<{
   let tickersSkipped = 0;
   console.log(`[syncMarketData] Starting sync for ${tickers.length} tickers.`);
 
-  // Start-of-today in server local time. Any snapshot whose timestamp is at or
-  // after this counts as "already synced today" and is skipped on re-runs.
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
+  // One `now` for the whole pass. A 45-ticker run takes ~90s at the throttle
+  // below, so re-reading the clock per ticker could put the first and last
+  // ticker on opposite sides of the 16:00 close and give them different
+  // skip decisions within a single run.
+  const now = new Date();
+  const marketOpen = isMarketOpen(now);
 
   // 7-day rolling window so weekends / market holidays are still captured.
   const today = new Date();
@@ -62,21 +73,23 @@ export async function syncMarketData(): Promise<{
 
   for (const { id: investmentId, ticker } of tickersToProcess) {
     try {
-      //  Same-day guard: skip if we already have a snapshot since midnight
-      const existing = await db
-        .select({ id: priceSnapshots.id })
+      // Session-aware guard (replaces the old same-day skip): refresh at most
+      // hourly while the market is open, capture the closing print once, and
+      // stay quiet overnight and at weekends. See shouldSyncTicker().
+      const newest = await db
+        .select({ timestamp: priceSnapshots.timestamp })
         .from(priceSnapshots)
-        .where(
-          and(
-            eq(priceSnapshots.investmentId, investmentId),
-            gte(priceSnapshots.timestamp, todayStart),
-          ),
-        )
+        .where(eq(priceSnapshots.investmentId, investmentId))
+        .orderBy(desc(priceSnapshots.timestamp))
         .limit(1)
         .all();
-      if (existing.length > 0) {
+
+      const newestAt = newest[0]?.timestamp ?? null;
+      if (!shouldSyncTicker(newestAt, now)) {
         console.log(
-          `[syncMarketData] ${ticker}: snapshot already exists for today, skipping.`,
+          `[syncMarketData] ${ticker}: snapshot is current (${
+            marketOpen ? "refreshed within the hour" : "market closed"
+          }), skipping.`,
         );
         tickersSkipped++;
         tickersProcessed++;
@@ -86,7 +99,7 @@ export async function syncMarketData(): Promise<{
         continue;
       }
 
-      //  Quote (one row per ticker per day)
+      //  Quote (at most hourly per ticker while the market is open)
       const quote = await getQuote(ticker);
       // Reject all-zero quotes too, that's Finnhub's signal for an unrecognized
       // ticker (`Number.isFinite(0)` is true).

@@ -9,7 +9,8 @@ import { asc, desc, eq, and, gte, sql } from "drizzle-orm";
 import { logger } from "../logger";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
-import { getLastRun, isSyncInFlight } from "../lib/syncState";
+import { getSyncFreshness } from "../lib/syncState";
+import { isMarketOpen, staleAfterMinutes } from "../lib/marketHours";
 import { requireSession } from "../lib/session";
 
 const portfolio = new Hono();
@@ -205,7 +206,28 @@ portfolio.get("/sync-status", (c) => {
     path: c.req.path,
     count: 1,
   });
-  return c.json({ lastRun: getLastRun(), inFlight: isSyncInFlight() });
+
+  const { lastRun, lastDataAt, inFlight } = getSyncFreshness();
+  const now = new Date();
+
+  // The staleness threshold is computed per request, not fixed, because what
+  // counts as "current data" depends on the market session. During the day we
+  // expect an hourly print; overnight and at weekends the newest data that can
+  // exist is the last close, so the allowance grows with time since that close.
+  // A fixed 60 minutes would paint the badge red every evening for data that
+  // is perfectly up to date.
+  //
+  // Hono's JSON encoder does not serialise `Date` — same trap already handled
+  // in toSnapshotDTO. Emit ISO strings explicitly.
+  return c.json({
+    lastRun: lastRun
+      ? { at: lastRun.at.toISOString(), ok: lastRun.ok, note: lastRun.note }
+      : null,
+    lastDataAt: lastDataAt ? lastDataAt.toISOString() : null,
+    inFlight,
+    marketOpen: isMarketOpen(now),
+    staleAfterMinutes: staleAfterMinutes(now),
+  });
 });
 
 const querySchema = z.object({
@@ -377,8 +399,21 @@ portfolio.get("/investments", async (c) => {
       return c.json({ investments: [] });
     }
 
-    // Query 2: at most the 2 most-recent snapshots per held investment
-    // (ROW_NUMBER() makes the per-group limit exact at the engine). Outer SELECT aliases each snake_case column to camelCase
+    // Query 2: the latest snapshot per held investment, plus the latest from
+    // the previous *calendar day* — not simply the second-most-recent row.
+    //
+    // Snapshots are now taken hourly during market hours, so "second-most-
+    // recent" would be an hour ago and `delta` would silently become an
+    // intraday move rather than the day-over-day one the dashboard claims.
+    // Collapsing to one row per (investment, day) first — keeping that day's
+    // last print — restores day-over-day while letting `latest` still be the
+    // live intraday price.
+    //
+    // date(timestamp,'unixepoch') groups in UTC, which is safe here: US market
+    // hours (09:30–16:00 ET) map to 13:30–21:00 UTC and never straddle UTC
+    // midnight, so the UTC calendar day and the trading day always agree.
+    //
+    // Outer SELECT aliases each snake_case column to camelCase
     // because drizzle's raw `db.all(sql\`...\`)`, unlike the typed
     // builder, does NOT auto-translate column names — and downstream
     // reads use camelCase. The outer ORDER BY also preserves
@@ -387,12 +422,20 @@ portfolio.get("/investments", async (c) => {
     const investmentIds = investmentsRows.map((row) => row.id);
     type RankedSnapshot = Snapshot & { rn: number };
     const recentSnapshots = (await db.all(sql`
-      WITH ranked AS (
+      WITH per_day AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY investment_id, date(timestamp, 'unixepoch')
+          ORDER BY timestamp DESC
+        ) AS intraday_rn
+        FROM price_snapshots
+        WHERE investment_id IN (${sql.join(investmentIds, sql`, `)})
+      ),
+      ranked AS (
         SELECT *, ROW_NUMBER() OVER (
           PARTITION BY investment_id ORDER BY timestamp DESC
         ) AS rn
-        FROM price_snapshots
-        WHERE investment_id IN (${sql.join(investmentIds, sql`, `)})
+        FROM per_day
+        WHERE intraday_rn = 1
       )
       SELECT
         id AS "id",
